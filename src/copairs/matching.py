@@ -367,7 +367,8 @@ class Matcher:
                     continue
                 mapper = self.reverse[col]
                 mapped.append(mapper[val])
-            valid = valid - set.intersection(*mapped)
+            if mapped:
+                valid = valid - set.intersection(*mapped)
         return valid
 
     def _get_full_pairs(self, mapper):
@@ -508,7 +509,7 @@ def _validate(sameby, diffby):
     if isinstance(sameby, str):
         sameby = (sameby,)
     if isinstance(diffby, str):
-        sameby = (diffby,)
+        diffby = (diffby,)
 
     if not (len(sameby) or len(diffby)):
         raise ValueError("at least one should be provided")
