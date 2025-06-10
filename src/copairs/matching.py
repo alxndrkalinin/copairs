@@ -508,7 +508,7 @@ def _validate(sameby, diffby):
     if isinstance(sameby, str):
         sameby = (sameby,)
     if isinstance(diffby, str):
-        sameby = (diffby,)
+        diffby = (diffby,)
 
     if not (len(sameby) or len(diffby)):
         raise ValueError("at least one should be provided")
