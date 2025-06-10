@@ -367,7 +367,8 @@ class Matcher:
                     continue
                 mapper = self.reverse[col]
                 mapped.append(mapper[val])
-            valid = valid - set.intersection(*mapped)
+            if mapped:
+                valid = valid - set.intersection(*mapped)
         return valid
 
     def _get_full_pairs(self, mapper):
