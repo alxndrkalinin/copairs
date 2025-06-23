@@ -6,7 +6,7 @@ import re
 from collections import namedtuple
 from copy import copy
 from math import comb
-from typing import Dict, Sequence, Set, Union
+from typing import Dict, Sequence, Set, Tuple, Union
 
 import duckdb
 import numpy as np
@@ -522,7 +522,7 @@ def find_pairs_multilabel(
     sameby: Union[str, ColumnList],
     diffby: Union[str, ColumnList],
     multilabel_col: str,
-) -> np.ndarray or tuple(np.ndarray, np.ndarray, np.ndarray):
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
     Find pairs of rows in a DataFrame that have the same or different values in certain columns.
 
