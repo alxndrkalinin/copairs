@@ -131,3 +131,15 @@ def test_only_sameby_many_cols():
     )
     dframe = dframe.groupby(["p", "w"])["c"].unique().reset_index()
     check_naive(dframe, sameby, diffby, multilabel_col)
+
+
+def test_accepts_tuples_inputs():
+    """find_pairs_multilabel should accept tuples for sameby and diffby."""
+    multilabel_col = "c"
+    sameby = ("c",)
+    diffby = ("p", "w")
+    dframe = simulate_random_plates(
+        n_compounds=4, n_replicates=5, plate_size=5, sameby=sameby, diffby=diffby
+    )
+    dframe = dframe.groupby(["p", "w"])["c"].unique().reset_index()
+    check_naive(dframe, sameby, diffby, multilabel_col)

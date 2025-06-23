@@ -548,6 +548,10 @@ def find_pairs_multilabel(
     -----
     The function asserts that `multilabel_col` is present in either `sameby` or `diffby`.
     """
+    sameby, diffby = _validate(sameby, diffby)
+    sameby = list(sameby)
+    diffby = list(diffby)
+
     assert (multilabel_col in sameby) or (multilabel_col in diffby), (
         f"Missing {multilabel_col} in sameby and diffby"
     )
