@@ -166,6 +166,4 @@ def test_accepts_string_inputs():
     vals = pd.DataFrame(vals, columns=["index_x", "index_y"])
     vals = vals.sort_values(["index_x", "index_y"]).reset_index(drop=True)
 
-    assert set(vals.apply(frozenset, axis=1)) == set(
-        gt_pairs.apply(frozenset, axis=1)
-    )
+    assert set(vals.apply(frozenset, axis=1)) == set(gt_pairs.apply(frozenset, axis=1))

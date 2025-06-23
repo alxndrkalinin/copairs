@@ -1,6 +1,5 @@
 """Sample pairs with given column restrictions."""
 
-
 import re
 import logging
 import itertools
