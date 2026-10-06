@@ -1,0 +1,206 @@
+"""CUDA (CuPy) backend for the AP null sampler.
+
+The kernel is a line-by-line port of :func:`copairs.nulls.sampler._ap_sample`:
+the same Philox blocks, the same double-precision operations in the same order,
+and FMA contraction disabled, so it returns the same float32 values as the
+NumPy and Numba backends.
+"""
+
+import functools
+
+import numpy as np
+
+try:
+    import cupy as cp
+except ImportError:  # pragma: no cover - exercised only without cupy
+    cp = None
+
+_PHILOX = r"""
+__device__ __forceinline__ void philox4x32(unsigned int c[4], unsigned int k0, unsigned int k1) {
+    #pragma unroll
+    for (int r = 0; r < 10; ++r) {
+        if (r > 0) { k0 += 0x9E3779B9u; k1 += 0xBB67AE85u; }
+        unsigned int hi0 = __umulhi(0xD2511F53u, c[0]), lo0 = 0xD2511F53u * c[0];
+        unsigned int hi1 = __umulhi(0xCD9E8D57u, c[2]), lo1 = 0xCD9E8D57u * c[2];
+        unsigned int n0 = hi1 ^ c[1] ^ k0, n2 = hi0 ^ c[3] ^ k1;
+        c[0] = n0; c[1] = lo1; c[2] = n2; c[3] = lo0;
+    }
+}
+
+__device__ __forceinline__ double uniform53(unsigned int a, unsigned int b) {
+    unsigned long long x = ((unsigned long long)(a >> 5) << 26) | (b >> 6);
+    return (double)x * (1.0 / 9007199254740992.0);
+}
+
+// Average precision of sample j; mirrors copairs.nulls.sampler._ap_sample.
+__device__ double ap_sample(long long num_pos, long long total, unsigned long long j,
+                            unsigned int k0, unsigned int k1) {
+    long long remaining = total, k = num_pos, rank = 0, i = 0;
+    double acc = 0.0, u, u_next = 0.0;
+    while (k > 0) {
+        if (k == remaining) {
+            while (k > 0) { rank += 1; i += 1; acc += (double)i / (double)rank; k -= 1; }
+            break;
+        }
+        if (i % 2 == 0) {
+            unsigned int c[4] = {(unsigned int)(j & 0xFFFFFFFFull), (unsigned int)(j >> 32),
+                                 (unsigned int)(i / 2), 0u};
+            philox4x32(c, k0, k1);
+            u = uniform53(c[0], c[1]);
+            u_next = uniform53(c[2], c[3]);
+        } else {
+            u = u_next;
+        }
+        long long gap;
+        if (k == 1) {
+            gap = (long long)floor((double)remaining * u);
+            if (gap > remaining - 1) gap = remaining - 1;
+        } else {
+            long long top = remaining - k;
+            double quot = (double)top / (double)remaining;
+            gap = 0;
+            while (quot > u) {
+                gap += 1;
+                top -= 1;
+                quot = quot * ((double)top / (double)(remaining - gap));
+            }
+        }
+        rank += gap + 1;
+        i += 1;
+        acc += (double)i / (double)rank;
+        remaining -= gap + 1;
+        k -= 1;
+    }
+    return acc / (double)num_pos;
+}
+"""
+
+_AP_NULLS = (
+    _PHILOX
+    + r"""
+template <typename T>
+__device__ void ap_nulls(const long long* num_pos, const long long* total,
+                         const unsigned int* k0, const unsigned int* k1,
+                         long long start, long long size, long long n_conf, T* out) {
+    long long n = n_conf * size;
+    for (long long flat = blockIdx.x * (long long)blockDim.x + threadIdx.x; flat < n;
+         flat += (long long)gridDim.x * blockDim.x) {
+        long long c = flat / size;
+        long long t = flat - c * size;
+        out[flat] = (T)ap_sample(num_pos[c], total[c], (unsigned long long)(start + t),
+                                 k0[c], k1[c]);
+    }
+}
+
+extern "C" __global__ void ap_nulls_f32(const long long* num_pos, const long long* total,
+                                        const unsigned int* k0, const unsigned int* k1,
+                                        long long start, long long size, long long n_conf,
+                                        float* out) {
+    ap_nulls<float>(num_pos, total, k0, k1, start, size, n_conf, out);
+}
+
+extern "C" __global__ void ap_nulls_f64(const long long* num_pos, const long long* total,
+                                        const unsigned int* k0, const unsigned int* k1,
+                                        long long start, long long size, long long n_conf,
+                                        double* out) {
+    ap_nulls<double>(num_pos, total, k0, k1, start, size, n_conf, out);
+}
+"""
+)
+
+_OPTIONS = ("--fmad=false", "-std=c++14")
+_BLOCK = 256
+
+
+def is_available() -> bool:
+    """Whether CuPy is installed and sees at least one CUDA device."""
+    if cp is None:
+        return False
+    try:
+        return cp.cuda.runtime.getDeviceCount() > 0
+    except cp.cuda.runtime.CUDARuntimeError:
+        return False
+
+
+@functools.cache
+def _kernel(name: str):
+    return cp.RawModule(code=_AP_NULLS, options=_OPTIONS).get_function(name)
+
+
+def _grid(n: int) -> int:
+    sms = cp.cuda.Device().attributes["MultiProcessorCount"]
+    return int(max(1, min((n + _BLOCK - 1) // _BLOCK, sms * 32)))
+
+
+def ap_nulls(num_pos, total, k0, k1, start: int, size: int, dtype=np.float32):
+    """``(n_conf, size)`` CuPy array of AP null samples in ``dtype``."""
+    n_conf = len(num_pos)
+    out = cp.empty((n_conf, size), dtype=dtype)
+    if out.size == 0:
+        return out
+    args = (
+        cp.asarray(num_pos, dtype=cp.int64),
+        cp.asarray(total, dtype=cp.int64),
+        cp.asarray(np.asarray(k0, dtype=np.uint32)),
+        cp.asarray(np.asarray(k1, dtype=np.uint32)),
+        np.int64(start),
+        np.int64(size),
+        np.int64(n_conf),
+        out,
+    )
+    name = "ap_nulls_f64" if out.dtype == np.float64 else "ap_nulls_f32"
+    _kernel(name)((_grid(out.size),), (_BLOCK,), args)
+    return out
+
+
+_GROUP_GE = r"""
+// counts[g] += #{t : sum_e conf_cnt[e] * null[conf_ix[e], t] / n_group[g] >= thr[g]}
+extern "C" __global__ void group_ge(const double* null, long long size, long long n_groups,
+                                    const long long* ptr, const long long* conf_ix,
+                                    const long long* conf_cnt, const long long* n_group,
+                                    const double* thr, unsigned long long* counts) {
+    for (long long g = blockIdx.y; g < n_groups; g += gridDim.y) {
+        long long lo = ptr[g], hi = ptr[g + 1];
+        unsigned long long hits = 0;
+        for (long long t = blockIdx.x * (long long)blockDim.x + threadIdx.x; t < size;
+             t += (long long)gridDim.x * blockDim.x) {
+            double acc = 0.0;
+            for (long long e = lo; e < hi; ++e)
+                acc += (double)conf_cnt[e] * null[conf_ix[e] * size + t];
+            if (acc / (double)n_group[g] >= thr[g]) hits += 1;
+        }
+        for (int off = 16; off > 0; off >>= 1) hits += __shfl_down_sync(0xffffffffu, hits, off);
+        if ((threadIdx.x & 31) == 0 && hits) atomicAdd(counts + g, hits);
+    }
+}
+"""
+
+
+@functools.cache
+def _group_kernel():
+    return cp.RawKernel(_GROUP_GE, "group_ge", options=_OPTIONS)
+
+
+class GroupCounter:
+    """Accumulate group-null exceedance counts over chunks of AP null samples."""
+
+    def __init__(self, ptr, conf_ix, conf_cnt, n_group, thr):
+        self.n_groups = len(ptr) - 1
+        self.args = tuple(cp.asarray(a) for a in (ptr, conf_ix, conf_cnt, n_group, thr))
+        self._counts = cp.zeros(self.n_groups, dtype=cp.uint64)
+
+    def __call__(self, null):
+        """Add the exceedances of one ``(n_conf, size)`` float64 chunk of nulls."""
+        size = null.shape[1]
+        sms = cp.cuda.Device().attributes["MultiProcessorCount"]
+        gx = int(max(1, min((size + _BLOCK - 1) // _BLOCK, sms * 8)))
+        gy = int(min(self.n_groups, 65535))
+        _group_kernel()(
+            (gx, gy),
+            (_BLOCK,),
+            (null, np.int64(size), np.int64(self.n_groups), *self.args, self._counts),
+        )
+
+    def counts(self) -> np.ndarray:
+        """Total exceedance count of each group."""
+        return self._counts.get().astype(np.int64)
