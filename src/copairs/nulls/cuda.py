@@ -118,7 +118,9 @@ def is_available() -> bool:
         return False
     try:
         return cp.cuda.runtime.getDeviceCount() > 0
-    except cp.cuda.runtime.CUDARuntimeError:
+    except RuntimeError:
+        # CUDARuntimeError (no device, insufficient driver) or a CUDA runtime
+        # library that fails to load: either way there is no usable GPU.
         return False
 
 
