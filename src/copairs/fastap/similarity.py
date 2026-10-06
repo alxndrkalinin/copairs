@@ -1,0 +1,96 @@
+"""Pairwise similarities computed in parallel kernels.
+
+Cosine-type metrics normalize each profile once and then take one dot
+product per pair, instead of gathering and normalizing both rows of every
+pair. Dot products accumulate in float64 and are returned as float32, like
+``copairs.compute.get_similarity_fn``; results match it to float32 rounding,
+not bitwise.
+"""
+
+import numba
+import numpy as np
+
+FAST_METRICS = (
+    "cosine",
+    "abs_cosine",
+    "correlation",
+    "euclidean",
+    "manhattan",
+    "chebyshev",
+)
+
+
+def _unit_rows(feats: np.ndarray, center: bool) -> np.ndarray:
+    """Rows scaled to unit norm (after centering for correlation)."""
+    x = np.asarray(feats, dtype=np.float64)
+    if center:
+        x = x - x.mean(axis=1, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        x = x / np.linalg.norm(x, axis=1, keepdims=True)
+    return x.astype(feats.dtype if feats.dtype == np.float64 else np.float32)
+
+
+@numba.njit(parallel=True, fastmath={"reassoc", "contract"}, cache=True)
+def _dot_pairs(x, pairs, out):
+    for p in numba.prange(len(pairs)):
+        a, b = x[pairs[p, 0]], x[pairs[p, 1]]
+        acc = 0.0
+        for t in range(len(a)):
+            acc += np.float64(a[t]) * b[t]
+        out[p] = acc
+
+
+@numba.njit(parallel=True, fastmath={"reassoc", "contract"}, cache=True)
+def _minkowski_pairs(x, pairs, kind, out):
+    """``1 / (1 + distance)`` for kind 0 = euclidean, 1 = manhattan, 2 = chebyshev."""
+    for p in numba.prange(len(pairs)):
+        a, b = x[pairs[p, 0]], x[pairs[p, 1]]
+        acc = 0.0
+        for t in range(len(a)):
+            diff = abs(np.float64(a[t]) - b[t])
+            if kind == 0:
+                acc += diff * diff
+            elif kind == 1:
+                acc += diff
+            elif diff > acc:
+                acc = diff
+        if kind == 0:
+            acc = np.sqrt(acc)
+        out[p] = 1.0 / (1.0 + acc)
+
+
+class PairSimilarity:
+    """Similarity of indexed profile pairs for one feature matrix.
+
+    Parameters
+    ----------
+    feats : np.ndarray
+        ``(n, d)`` profiles.
+    metric : str
+        One of :data:`FAST_METRICS`.
+    """
+
+    def __init__(self, feats: np.ndarray, metric: str):
+        if metric not in FAST_METRICS:
+            raise ValueError(f"no fast kernel for {metric!r}; expected {FAST_METRICS}")
+        feats = np.asarray(feats)
+        if feats.dtype not in (np.float32, np.float64):
+            feats = feats.astype(np.float64)
+        self.metric = metric
+        if metric in ("cosine", "abs_cosine", "correlation"):
+            self.x = np.ascontiguousarray(_unit_rows(feats, metric == "correlation"))
+        else:
+            self.x = np.ascontiguousarray(feats)
+
+    def __call__(self, pairs: np.ndarray) -> np.ndarray:
+        """float32 similarity of each ``(i, j)`` row of ``pairs``."""
+        pairs = np.ascontiguousarray(pairs, dtype=np.int64).reshape(-1, 2)
+        out = np.empty(len(pairs), dtype=np.float64)
+        if self.metric in ("cosine", "abs_cosine", "correlation"):
+            _dot_pairs(self.x, pairs, out)
+            if self.metric == "abs_cosine":
+                np.abs(out, out=out)
+        else:
+            kind = ("euclidean", "manhattan", "chebyshev").index(self.metric)
+            _minkowski_pairs(self.x, pairs, kind, out)
+        return out.astype(np.float32)

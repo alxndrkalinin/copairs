@@ -6,7 +6,7 @@ from typing import List
 import numpy as np
 import pandas as pd
 
-from copairs import compute
+from copairs import fastap, compute
 from copairs.matching import UnpairedException, find_pairs
 
 from .filter import flatten_str_list, evaluate_and_filter, validate_pipeline_input
@@ -92,6 +92,8 @@ def average_precision(
     batch_size: int = 20000,
     distance: str = "cosine",
     progress_bar: bool = True,
+    method: str = "fast",
+    backend: str = "auto",
 ) -> pd.DataFrame:
     """Calculate average precision (AP) scores for pairs of profiles based on their similarity.
 
@@ -143,6 +145,19 @@ def average_precision(
     distance : str
         The distance function used for computing similarities. Default is "cosine".
 
+    method : str
+        ``"fast"`` (default) computes similarities with parallel kernels (for
+        cosine, abs_cosine, correlation, euclidean, manhattan and chebyshev;
+        other metrics use the generic path) and AP by counting, without
+        sorting rank lists. AP values match ``"legacy"`` to float64 rounding
+        for identical similarities; the kernels' similarities match to float32
+        rounding, so near-ties can order differently. ``"legacy"`` reproduces
+        copairs <= 0.5.5.
+
+    backend : str
+        ``"auto"``, ``"cuda"``, ``"numba"``, or ``"numpy"`` (the legacy NumPy
+        implementation) for the fast method.
+
     Returns
     -------
     pd.DataFrame
@@ -174,8 +189,20 @@ def average_precision(
     meta, columns = evaluate_and_filter(meta, columns)
     validate_pipeline_input(meta, feats, columns)
 
+    compute._check_method(method)
+    if method == "fast":
+        backend = fastap.resolve_backend(backend)
+        if backend == "numpy":
+            method = "legacy"
+
     # Get the distance function for similarity calculations (e.g., cosine)
     similarity_fn = compute.get_similarity_fn(distance, progress_bar=progress_bar)
+    if method == "fast":
+        pair_similarity = fastap.pair_similarity(np.asarray(feats), distance, backend)
+        if pair_similarity is not None:
+
+            def similarity_fn(feats, pairs, batch_size):
+                return pair_similarity(pairs)
 
     # Reset metadata index for consistent indexing
     meta = meta.reset_index(drop=True).copy()
@@ -202,15 +229,21 @@ def average_precision(
     logger.info("Computing negative similarities...")
     neg_sims = similarity_fn(feats, neg_pairs, batch_size)
 
-    # Build rank lists for calculating average precision
-    logger.info("Building rank lists...")
-    paired_ix, rel_k_list, counts = build_rank_lists(
-        pos_pairs, neg_pairs, pos_sims, neg_sims
-    )
+    if method == "fast":
+        logger.info("Computing average precision...")
+        paired_ix, ap_scores, null_confs = fastap.ap_from_pairs(
+            pos_pairs, neg_pairs, pos_sims, neg_sims, backend=backend
+        )
+    else:
+        # Build rank lists for calculating average precision
+        logger.info("Building rank lists...")
+        paired_ix, rel_k_list, counts = build_rank_lists(
+            pos_pairs, neg_pairs, pos_sims, neg_sims
+        )
 
-    # Compute average precision scores and associated configurations
-    logger.info("Computing average precision...")
-    ap_scores, null_confs = compute.ap_contiguous(rel_k_list, counts)
+        # Compute average precision scores and associated configurations
+        logger.info("Computing average precision...")
+        ap_scores, null_confs = compute.ap_contiguous(rel_k_list, counts)
 
     # Add AP scores and pair counts to the metadata DataFrame
     logger.info("Creating result DataFrame...")
