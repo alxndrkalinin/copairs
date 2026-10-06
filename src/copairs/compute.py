@@ -526,12 +526,22 @@ def null_dist_cached(
     return null_dist
 
 
+NULL_METHODS = ("fast", "legacy")
+
+
+def _check_method(method: str) -> None:
+    if method not in NULL_METHODS:
+        raise ValueError(f"unknown method {method!r}; expected one of {NULL_METHODS}")
+
+
 def get_null_dists(
     confs: np.ndarray,
     null_size: int,
     seed: int,
     cache_dir: Optional[Union[str, Path]] = None,
     progress_bar: bool = True,
+    method: str = "fast",
+    backend: str = "auto",
 ) -> np.ndarray:
     """Generate null distributions for each configuration of positive and total pairs.
 
@@ -544,15 +554,47 @@ def get_null_dists(
         Number of samples to generate in the null distribution.
     seed : int
         Random seed for reproducibility.
+    cache_dir : str or Path, optional
+        Cache location for ``method="legacy"`` (default ``~/.copairs``). The fast
+        method regenerates nulls deterministically and does not cache them.
     progress_bar : bool
         Whether or not to show tqdm's progress bar.
+    method : str
+        ``"fast"`` (default) samples each null exactly with
+        :func:`copairs.nulls.ap_nulls`: sample ``j`` depends only on
+        ``(seed, num_pos, total, j)``, in O(1) memory per sample. ``"legacy"``
+        reproduces copairs <= 0.5.5 bitwise by permuting a
+        ``null_size x total`` matrix per configuration.
+    backend : str
+        Backend of the fast method: ``"auto"``, ``"cuda"``, ``"numba"`` or
+        ``"numpy"``. All return identical values.
 
     Returns
     -------
     np.ndarray
-        A 2D array where each row corresponds to a null distribution for a specific
-        configuration.
+        A 2D float32 array where each row corresponds to a null distribution for a
+        specific configuration.
     """
+    _check_method(method)
+    if method == "legacy":
+        return _get_null_dists_legacy(confs, null_size, seed, cache_dir, progress_bar)
+    from copairs import nulls
+    from copairs.nulls.pvalues import resolve_seed
+
+    confs = np.asarray(confs)
+    if len(confs) == 0:
+        return np.empty((0, null_size), dtype=np.float32)
+    return nulls.ap_nulls(confs, null_size, resolve_seed(seed), backend=backend)
+
+
+def _get_null_dists_legacy(
+    confs: np.ndarray,
+    null_size: int,
+    seed: int,
+    cache_dir: Optional[Union[str, Path]] = None,
+    progress_bar: bool = True,
+) -> np.ndarray:
+    """Null distributions as computed by copairs <= 0.5.5 (``method="legacy"``)."""
     cache_dir = Path.home() / ".copairs" if cache_dir is None else Path(cache_dir)
     cache_dir = cache_dir / f"seed{seed}" / f"ns{null_size}"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -583,6 +625,8 @@ def p_values(
     null_size: int,
     seed: int,
     progress_bar: bool = True,
+    method: str = "fast",
+    backend: str = "auto",
 ):
     """Calculate p-values for an array of Average Precision (AP) scores using a null distribution.
 
@@ -600,17 +644,41 @@ def p_values(
         distribution.
     progress_bar : bool
         Whether or not to show tqdm's progress bar.
+    method : str
+        ``"fast"`` (default) streams exact null samples (see
+        :func:`get_null_dists`) and counts null scores ``>= score``, treating
+        values within :data:`copairs.nulls.TIE_TOL` as ties. ``"legacy"``
+        reproduces copairs <= 0.5.5.
+    backend : str
+        Backend of the fast method, see :func:`get_null_dists`.
 
     Returns
     -------
     np.ndarray
         An array of p-values corresponding to the input AP scores.
     """
+    _check_method(method)
     # Identify unique configurations and their indices
     confs, rev_ix = np.unique(null_confs, axis=0, return_inverse=True)
 
+    if method == "fast":
+        from copairs import nulls
+
+        pvals = nulls.ap_pvalues(
+            ap_scores,
+            rev_ix.ravel(),
+            confs,
+            null_size,
+            seed,
+            backend=backend,
+            progress_bar=progress_bar,
+        )
+        return pvals.astype(np.float32)
+
     # Generate null distributions for each unique configuration
-    null_dists = get_null_dists(confs, null_size, seed, progress_bar=progress_bar)
+    null_dists = _get_null_dists_legacy(
+        confs, null_size, seed, progress_bar=progress_bar
+    )
 
     # Sort null distributions for efficient p-value computation
     null_dists.sort(axis=1)

@@ -26,6 +26,8 @@ def get_map_pvalue(
     progress_bar: bool = True,
     max_workers: Optional[int] = None,
     cache_dir: Optional[Union[str, Path]] = None,
+    method: str = "fast",
+    backend: str = "auto",
 ) -> pd.DataFrame:
     """Compute mAP scores and p-values from AP scores.
 
@@ -49,7 +51,16 @@ def get_map_pvalue(
     max_workers : int
         Number of workers used. Default defined by tqdm's `thread_map`.
     cache_dir : str or Path
-        Location to save the cache.
+        Location to save the cache (``method="legacy"`` only).
+    method : str
+        ``"fast"`` (default) streams exact null samples and counts group nulls
+        ``>= mAP``, treating values within :data:`copairs.nulls.TIE_TOL` as ties,
+        in bounded memory. ``"legacy"`` reproduces copairs <= 0.5.5, which counts
+        group nulls ``> mAP`` and so gives too small p-values when the observed
+        mAP equals an atom of the null (e.g. perfect retrieval).
+    backend : str
+        Backend of the fast method: ``"auto"``, ``"cuda"``, ``"numba"`` or
+        ``"numpy"``.
 
     Returns
     -------
@@ -66,26 +77,10 @@ def get_map_pvalue(
     ap_scores = ap_scores.query("~average_precision.isna() and n_pos_pairs > 0")
     ap_scores = ap_scores.reset_index(drop=True).copy()
 
-    logger.info("Computing null_dist...")
-    # Extract configurations for null distribution generation
+    compute._check_method(method)
     null_confs = ap_scores[["n_pos_pairs", "n_total_pairs"]].values
     null_confs, rev_ix = np.unique(null_confs, axis=0, return_inverse=True)
-
-    # Generate null distributions for each unique configuration
-    null_dists = compute.get_null_dists(
-        null_confs, null_size, seed=seed, cache_dir=cache_dir, progress_bar=progress_bar
-    )
-    ap_scores["null_ix"] = rev_ix
-
-    # Function to calculate the p-value for a mAP score based on the null distribution
-    def get_p_value(params):
-        map_score, indices = params
-        null_dist = null_dists[rev_ix[indices]].mean(axis=0)
-        num = (null_dist > map_score).sum()
-        p_value = (num + 1) / (null_size + 1)  # Add 1 for stability
-        return p_value
-
-    logger.info("Computing p-values...")
+    rev_ix = rev_ix.ravel()
 
     # Group by the specified metadata column(s) and calculate mean AP
     map_scores = ap_scores.groupby(sameby, observed=True, as_index=False).agg(
@@ -99,6 +94,52 @@ def get_map_pvalue(
         "indices",
         "mean_normalized_average_precision",
     ]
+
+    if method == "fast":
+        from copairs import nulls
+
+        logger.info("Computing p-values...")
+        # (group, configuration) member counts in CSR layout.
+        sizes = map_scores["indices"].map(len).to_numpy()
+        group = np.repeat(np.arange(len(map_scores)), sizes)
+        rows = np.concatenate(map_scores["indices"].to_numpy()).astype(np.int64)
+        keys, conf_cnt = np.unique(
+            group * len(null_confs) + rev_ix[rows], return_counts=True
+        )
+        ptr = np.searchsorted(keys // len(null_confs), np.arange(len(map_scores) + 1))
+        map_scores["p_value"] = nulls.map_pvalues(
+            map_scores["mean_average_precision"].to_numpy(),
+            ptr,
+            keys % len(null_confs),
+            conf_cnt,
+            null_confs,
+            null_size,
+            seed,
+            backend=backend,
+            progress_bar=progress_bar,
+        )
+        return map_scores
+
+    logger.info("Computing null_dist...")
+    # Generate null distributions for each unique configuration
+    null_dists = compute.get_null_dists(
+        null_confs,
+        null_size,
+        seed=seed,
+        cache_dir=cache_dir,
+        progress_bar=progress_bar,
+        method="legacy",
+    )
+
+    # Function to calculate the p-value for a mAP score based on the null distribution
+    def get_p_value(params):
+        map_score, indices = params
+        null_dist = null_dists[rev_ix[indices]].mean(axis=0)
+        num = (null_dist > map_score).sum()
+        p_value = (num + 1) / (null_size + 1)  # Add 1 for stability
+        return p_value
+
+    logger.info("Computing p-values...")
 
     # Compute p-values for each group using the null distributions
     params = map_scores[["mean_average_precision", "indices"]]
@@ -127,6 +168,8 @@ def mean_average_precision(
     progress_bar: bool = True,
     max_workers: Optional[int] = None,
     cache_dir: Optional[Union[str, Path]] = None,
+    method: str = "fast",
+    backend: str = "auto",
 ) -> pd.DataFrame:
     """Calculate the Mean Average Precision (mAP) score and associated p-values.
 
@@ -153,7 +196,11 @@ def mean_average_precision(
     max_workers : int
         Number of workers used. Default defined by tqdm's `thread_map`.
     cache_dir : str or Path
-        Location to save the cache.
+        Location to save the cache (``method="legacy"`` only).
+    method : str
+        ``"fast"`` (default) or ``"legacy"``, see :func:`get_map_pvalue`.
+    backend : str
+        Backend of the fast method, see :func:`get_map_pvalue`.
 
     Returns
     -------
@@ -180,6 +227,8 @@ def mean_average_precision(
         progress_bar=progress_bar,
         max_workers=max_workers,
         cache_dir=cache_dir,
+        method=method,
+        backend=backend,
     )
 
     # Step 2: Apply multiple testing correction
@@ -202,6 +251,8 @@ def mean_average_precision_hierarchical(
     progress_bar: bool = True,
     max_workers: Optional[int] = None,
     cache_dir: Optional[Union[str, Path]] = None,
+    method: str = "fast",
+    backend: str = "auto",
 ) -> pd.DataFrame:
     """Calculate the Mean Average Precision (mAP) score with hierarchical FDR correction.
 
@@ -241,7 +292,11 @@ def mean_average_precision_hierarchical(
     max_workers : int
         Number of workers used. Default defined by tqdm's `thread_map`.
     cache_dir : str or Path
-        Location to save the cache.
+        Location to save the cache (``method="legacy"`` only).
+    method : str
+        ``"fast"`` (default) or ``"legacy"``, see :func:`get_map_pvalue`.
+    backend : str
+        Backend of the fast method, see :func:`get_map_pvalue`.
 
     Returns
     -------
@@ -271,6 +326,8 @@ def mean_average_precision_hierarchical(
         progress_bar=progress_bar,
         max_workers=max_workers,
         cache_dir=cache_dir,
+        method=method,
+        backend=backend,
     )
 
     # Step 2: Apply hierarchical multiple testing correction
