@@ -187,3 +187,90 @@ def ap_from_pairs(pos_pairs, neg_pairs, pos_keys, neg_keys, n: int):
     ap = cp.empty(n, dtype=cp.float64)
     _kernel("ap_from_hist")((_grid(n),), (_BLOCK,), (ptr, hist, np.int64(n), ap))
     return ap.get(), cp.diff(ptr).get(), n_neg.get().astype(np.int64)
+
+
+_DRAW_SOURCE = r"""
+// AP of each (draw, query) row of sims (n_rows, k + m); the first k columns are the
+// draw's queries (the row's own column is skipped), the rest its references.
+extern "C" __global__ void draw_ap(const float* sims, int k, int m, long long n_rows,
+                                   double* ap) {
+    extern __shared__ float smem[];
+    float* pos = smem;                                   // k - 1, descending
+    unsigned int* hist = (unsigned int*)(smem + k);      // k bins
+    for (long long row = blockIdx.x; row < n_rows; row += gridDim.x) {
+        const float* s = sims + row * (long long)(k + m);
+        int q = (int)(row % k);
+        for (int j = threadIdx.x; j < k; j += blockDim.x) hist[j] = 0u;
+        for (int j = threadIdx.x; j < k; j += blockDim.x) {
+            if (j == q) continue;
+            float v = s[j];
+            int r = 0;  // rank in descending order, ties by column
+            for (int i = 0; i < k; ++i) {
+                if (i == q) continue;
+                float w = s[i];
+                r += (w > v) || (w == v && i < j);
+            }
+            pos[r] = v;
+        }
+        __syncthreads();
+        for (int e = threadIdx.x; e < m; e += blockDim.x) {
+            float v = s[k + e];
+            int lo = 0, hi = k - 1;  // first t with pos[t] < v
+            while (lo < hi) {
+                int mid = (lo + hi) >> 1;
+                if (pos[mid] >= v) lo = mid + 1; else hi = mid;
+            }
+            atomicAdd(hist + lo, 1u);
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            unsigned long long before = 0;
+            double acc = 0.0;
+            for (int t = 0; t < k - 1; ++t) {
+                before += hist[t];
+                acc += (double)(t + 1) / (double)(t + 1 + before);
+            }
+            ap[row] = acc / (double)(k - 1);
+        }
+        __syncthreads();
+    }
+}
+"""
+
+
+@functools.cache
+def _draw_kernel(device_id: int):
+    with cp.cuda.Device(device_id):
+        return cp.RawKernel(_DRAW_SOURCE, "draw_ap", options=_OPTIONS)
+
+
+def draw_average_precisions(feats, queries, references, normalized, budget_bytes):
+    """CUDA backend of :func:`copairs.fastap.draws.draw_average_precisions`."""
+    from copairs.fastap.draws import _chunk, unit_rows
+
+    x = (
+        cp.asarray(feats, dtype=cp.float32)
+        if normalized
+        else unit_rows(cp.asarray(feats))
+    )
+    idx = cp.asarray(np.concatenate([queries, references], axis=1))
+    n_draws, k = queries.shape
+    m = references.shape[1]
+    out = cp.empty((n_draws, k), dtype=cp.float64)
+    kernel = _draw_kernel(cp.cuda.Device().id)
+    threads = 128 if m >= 128 else 32
+    step = _chunk(n_draws, k, m, x.shape[1], budget_bytes)
+    for start in range(0, n_draws, step):
+        rows = x[idx[start : start + step]]  # (b, k + m, d)
+        sims = cp.ascontiguousarray(cp.matmul(rows[:, :k], rows.transpose(0, 2, 1)))
+        n_rows = sims.shape[0] * k
+        grid = (int(min(n_rows, 65535 * 4)),)
+        args = (
+            sims,
+            np.int32(k),
+            np.int32(m),
+            np.int64(n_rows),
+            out[start : start + step],
+        )
+        kernel(grid, (threads,), args, shared_mem=8 * k)
+    return out.get()

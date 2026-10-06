@@ -126,3 +126,48 @@ def test_average_precision_fast_similarity(backend):
     np.testing.assert_allclose(
         fast["average_precision"], legacy["average_precision"], atol=0.05
     )
+
+
+def reference_draw_ap(query, reference):
+    """AP of each query by fully sorting its rank list (ties: queries first)."""
+    k = len(query)
+    feats = np.concatenate([query, reference]).astype(np.float32)
+    feats = feats / np.linalg.norm(feats, axis=1, keepdims=True)
+    sims = feats[:k] @ feats.T
+    sims[np.arange(k), np.arange(k)] = -np.inf
+    order = np.argsort(-sims, axis=1, kind="stable")[:, :-1]
+    rel_k = np.nonzero(order < k)[1].reshape(k, k - 1)
+    return (np.arange(1, k, dtype=np.float64) / (rel_k + 1)).mean(axis=1)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("k,m,ties", [(2, 5, False), (10, 40, False), (25, 100, True)])
+def test_draw_average_precisions(backend, k, m, ties):
+    """Batched draw APs equal fully sorted rank lists."""
+    rng = np.random.default_rng(4)
+    feats = rng.normal(size=(500, 8 if ties else 64)).astype(np.float32)
+    if ties:
+        feats = np.round(feats)
+        feats[:, 0] = 1
+    queries = np.stack([rng.choice(500, k, replace=False) for _ in range(30)])
+    refs = np.stack([rng.choice(500, m, replace=False) for _ in range(30)])
+    expected = np.stack(
+        [reference_draw_ap(feats[q], feats[r]) for q, r in zip(queries, refs)]
+    )
+    got = fastap.draw_average_precisions(
+        feats, queries, refs, backend=backend, budget_bytes=4 * (k + m) * 100 * 7
+    )
+    np.testing.assert_allclose(got, expected, rtol=1e-12, atol=1e-15)
+
+
+def test_draw_average_precisions_validation():
+    """Too few queries, mismatched draws and degenerate features raise."""
+    feats = np.eye(4, dtype=np.float32)
+    with pytest.raises(ValueError):
+        fastap.draw_average_precisions(feats, [[0]], [[1, 2]], backend="numba")
+    with pytest.raises(ValueError):
+        fastap.draw_average_precisions(feats, [[0, 1]], [[2], [3]], backend="numba")
+    with pytest.raises(ValueError):
+        fastap.draw_average_precisions(
+            np.zeros((4, 2)), [[0, 1]], [[2, 3]], backend="numba"
+        )

@@ -2,15 +2,18 @@
 
 Backends are ``"cuda"`` (CuPy) and ``"numba"``; ``"auto"`` picks CUDA when a
 GPU is usable. AP values match copairs' rank-list implementation to float64
-rounding given the same similarities.
+rounding given the same similarities. :func:`draw_average_precisions` scores
+many query-vs-reference draws at once.
 """
 
 import numpy as np
 
+from copairs.fastap.draws import draw_average_precisions
 from copairs.fastap.ranking import ap_from_pairs
 from copairs.fastap.similarity import FAST_METRICS, PairSimilarity
 
 __all__ = [
+    "draw_average_precisions",
     "FAST_METRICS",
     "PairSimilarity",
     "ap_from_pairs",
