@@ -226,13 +226,20 @@ def is_available() -> bool:
 
 
 @functools.cache
-def _kernel(name: str):
-    return cp.RawModule(code=_AP_NULLS, options=_OPTIONS).get_function(name)
+def _compiled(source: str, device_id: int):
+    with cp.cuda.Device(device_id):
+        return cp.RawModule(code=source, options=_OPTIONS)
 
 
-def _grid(n: int) -> int:
+def kernel(source: str, name: str):
+    """Kernel ``name`` of CUDA ``source``, compiled once per device."""
+    return _compiled(source, cp.cuda.Device().id).get_function(name)
+
+
+def grid(n: int, blocks_per_sm: int = 32) -> int:
+    """1-D grid size for ``n`` threads of ``_BLOCK``, capped per multiprocessor."""
     sms = cp.cuda.Device().attributes["MultiProcessorCount"]
-    return int(max(1, min((n + _BLOCK - 1) // _BLOCK, sms * 32)))
+    return int(max(1, min((n + _BLOCK - 1) // _BLOCK, sms * blocks_per_sm)))
 
 
 def ap_nulls(num_pos, total, k0, k1, start: int, size: int, dtype=np.float32):
@@ -252,7 +259,7 @@ def ap_nulls(num_pos, total, k0, k1, start: int, size: int, dtype=np.float32):
         out,
     )
     name = "ap_nulls_f64" if out.dtype == np.float64 else "ap_nulls_f32"
-    _kernel(name)((_grid(out.size),), (_BLOCK,), args)
+    kernel(_AP_NULLS, name)((grid(out.size),), (_BLOCK,), args)
     return out
 
 
@@ -279,11 +286,6 @@ extern "C" __global__ void group_ge(const double* null, long long size, long lon
 """
 
 
-@functools.cache
-def _group_kernel():
-    return cp.RawKernel(_GROUP_GE, "group_ge", options=_OPTIONS)
-
-
 class GroupCounter:
     """Accumulate group-null exceedance counts over chunks of AP null samples."""
 
@@ -295,10 +297,9 @@ class GroupCounter:
     def __call__(self, null):
         """Add the exceedances of one ``(n_conf, size)`` float64 chunk of nulls."""
         size = null.shape[1]
-        sms = cp.cuda.Device().attributes["MultiProcessorCount"]
-        gx = int(max(1, min((size + _BLOCK - 1) // _BLOCK, sms * 8)))
+        gx = grid(size, blocks_per_sm=8)
         gy = int(min(self.n_groups, 65535))
-        _group_kernel()(
+        kernel(_GROUP_GE, "group_ge")(
             (gx, gy),
             (_BLOCK,),
             (null, np.int64(size), np.int64(self.n_groups), *self.args, self._counts),

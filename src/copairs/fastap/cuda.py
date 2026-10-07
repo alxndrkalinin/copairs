@@ -1,13 +1,12 @@
 """CUDA (CuPy) kernels for pair similarities and counting-based AP."""
 
-import functools
-
 import numpy as np
 
 from copairs.nulls import cuda as _null_cuda
 
 cp = _null_cuda.cp
-is_available = _null_cuda.is_available
+_BLOCK = _null_cuda._BLOCK
+_grid = _null_cuda.grid
 
 _SOURCE = r"""
 // numpy ordering: NaN sorts after every number and ties with NaN.
@@ -110,23 +109,9 @@ extern "C" __global__ void ap_from_hist(const long long* ptr, const unsigned lon
 }
 """
 
-_OPTIONS = ("--fmad=false", "-std=c++14")
-_BLOCK = 256
-
-
-@functools.cache
-def _module(device_id: int):
-    with cp.cuda.Device(device_id):
-        return cp.RawModule(code=_SOURCE, options=_OPTIONS)
-
 
 def _kernel(name: str):
-    return _module(cp.cuda.Device().id).get_function(name)
-
-
-def _grid(n: int) -> int:
-    sms = cp.cuda.Device().attributes["MultiProcessorCount"]
-    return int(max(1, min((n + _BLOCK - 1) // _BLOCK, sms * 32)))
+    return _null_cuda.kernel(_SOURCE, name)
 
 
 class PairSimilarity:
@@ -238,12 +223,6 @@ extern "C" __global__ void draw_ap(const float* sims, int k, int m, long long n_
 """
 
 
-@functools.cache
-def _draw_kernel(device_id: int):
-    with cp.cuda.Device(device_id):
-        return cp.RawKernel(_DRAW_SOURCE, "draw_ap", options=_OPTIONS)
-
-
 def draw_average_precisions(feats, queries, references, normalized, budget_bytes):
     """CUDA backend of :func:`copairs.fastap.draws.draw_average_precisions`."""
     from copairs.fastap.draws import _chunk, unit_rows
@@ -257,7 +236,7 @@ def draw_average_precisions(feats, queries, references, normalized, budget_bytes
     n_draws, k = queries.shape
     m = references.shape[1]
     out = cp.empty((n_draws, k), dtype=cp.float64)
-    kernel = _draw_kernel(cp.cuda.Device().id)
+    kernel = _null_cuda.kernel(_DRAW_SOURCE, "draw_ap")
     threads = 128 if m >= 128 else 32
     step = _chunk(n_draws, k, m, x.shape[1], budget_bytes)
     for start in range(0, n_draws, step):
