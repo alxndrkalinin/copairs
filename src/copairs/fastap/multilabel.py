@@ -73,13 +73,10 @@ def _in_sorted(keys, sorted_keys):
     return sorted_keys[loc] == keys
 
 
-def multilabel_pairs(dframe, sameby, diffby, multilabel_col):
-    """Fast :func:`copairs.matching.find_pairs_multilabel`, or None if unsupported.
+def multilabel_pairs(dframe, multilabel_col):
+    """``(keys, pairs, label, n)`` of rows sharing each label, or None if unsupported.
 
-    ``sameby`` excludes ``multilabel_col``; ``diffby`` may hold it, so that
-    paired rows' label lists differ. Returns the same pair set as the SQL
-    implementation, with pairs sorted by label (sameby) or by ``(i, j)``
-    (diffby).
+    Pairs are grouped by label (see :func:`_label_pairs`).
     """
     if not dframe.index.equals(pd.RangeIndex(len(dframe))):
         return None
@@ -87,25 +84,63 @@ def multilabel_pairs(dframe, sameby, diffby, multilabel_col):
     if members is None:
         return None
     keys, ptr, rows = members
-    n = len(dframe)
     pairs, label = _label_pairs(ptr, rows)
-    mono = None
-    if len(sameby) or len(diffby):
-        # Only the compared columns: DuckDB would convert the label lists too.
-        columns = list(dict.fromkeys(sameby + diffby))
-        mono = find_pairs(dframe[columns], sameby, diffby).astype(np.int64)
-        mono = np.sort(mono[:, 0] * n + mono[:, 1])
-    return keys, pairs, label, mono, n
+    return keys, pairs, label, len(dframe)
+
+
+def _monolabel_keys(dframe, sameby, diffby):
+    """Sorted keys ``i * n + j`` of ``find_pairs(dframe, sameby, diffby)``."""
+    # Only the compared columns: DuckDB would convert the label lists too.
+    columns = list(dict.fromkeys(sameby + diffby))
+    mono = find_pairs(dframe[columns], sameby, diffby).astype(np.int64)
+    return np.sort(mono[:, 0] * len(dframe) + mono[:, 1])
+
+
+def _column_codes(dframe, columns, multilabel_col):
+    """Integer codes of each column's values, or None if SQL must compare them.
+
+    find_pairs compares in DuckDB, where missing values never match and mixed
+    Python types are converted, so such columns keep the SQL comparison.
+    """
+    codes = []
+    for c in columns:
+        col = dframe[c]
+        if c == multilabel_col:  # label lists, already checked, compare whole
+            col = col.map(tuple)
+        elif col.isna().any() or pd.api.types.infer_dtype(col).startswith("mixed"):
+            return None
+        codes.append(pd.factorize(col)[0])
+    return codes
+
+
+def _monolabel_mask(dframe, sameby, diffby, multilabel_col, pairs):
+    """Which ``pairs`` also satisfy the monolabel ``sameby``/``diffby`` columns."""
+    same = _column_codes(dframe, sameby, multilabel_col)
+    diff = _column_codes(dframe, diffby, multilabel_col)
+    if same is None or diff is None:
+        mono = _monolabel_keys(dframe, sameby, diffby)
+        return _in_sorted(pairs[:, 0] * len(dframe) + pairs[:, 1], mono)
+    keep = np.ones(len(pairs), dtype=bool)
+    for code in same:
+        keep &= code[pairs[:, 0]] == code[pairs[:, 1]]
+    for code in diff:
+        keep &= code[pairs[:, 0]] != code[pairs[:, 1]]
+    return keep
 
 
 def shared_label_pairs(dframe, sameby, diffby, multilabel_col):
-    """``(pairs, keys, counts)`` of rows sharing a label, or None."""
-    found = multilabel_pairs(dframe, sameby, diffby, multilabel_col)
+    """``(pairs, keys, counts)`` of rows sharing a label, or None.
+
+    ``sameby`` excludes ``multilabel_col``; ``diffby`` may hold it, so that
+    paired rows' label lists differ. Returns the same pairs as the SQL
+    implementation, grouped by label.
+    """
+    found = multilabel_pairs(dframe, multilabel_col)
     if found is None:
         return None
-    keys, pairs, label, mono, n = found
-    if mono is not None:
-        keep = _in_sorted(pairs[:, 0] * n + pairs[:, 1], mono)
+    keys, pairs, label, _ = found
+    if len(sameby) or len(diffby):
+        keep = _monolabel_mask(dframe, sameby, diffby, multilabel_col, pairs)
         pairs, label = pairs[keep], label[keep]
     counts = np.bincount(label, minlength=len(keys))
     present = counts > 0
@@ -148,14 +183,14 @@ def _sorted_difference(candidates, shared):
 
 def disjoint_label_pairs(dframe, sameby, diffby, multilabel_col):
     """Sorted unique pairs ``(i < j)`` of rows sharing no label, or None."""
-    found = multilabel_pairs(dframe, sameby, diffby, multilabel_col)
+    found = multilabel_pairs(dframe, multilabel_col)
     if found is None:
         return None
-    _, pairs, _, mono, n = found
+    _, pairs, _, n = found
     shared = np.unique(pairs[:, 0] * n + pairs[:, 1])
-    if mono is None:
+    if not (len(sameby) or len(diffby)):
         return _all_pairs_except(n, shared)
-    kept = _sorted_difference(mono, shared)
+    kept = _sorted_difference(_monolabel_keys(dframe, sameby, diffby), shared)
     return np.stack([kept // n, kept % n], axis=1).astype(np.uint32)
 
 

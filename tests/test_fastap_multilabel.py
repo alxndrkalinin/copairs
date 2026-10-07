@@ -82,6 +82,29 @@ def test_disjoint_label_pairs_match_sql(sameby, diffby):
     assert (np.diff(keys) > 0).all() and (pairs[:, 0] < pairs[:, 1]).all()
 
 
+@pytest.mark.parametrize(
+    "plate",
+    [
+        [None, "p0", "p1"],  # missing values never match in SQL
+        [1, "1", 2.0],  # mixed Python types, converted by DuckDB
+        [np.nan, 0.0, 1.0],
+    ],
+)
+@pytest.mark.parametrize(
+    "sameby,diffby", [(["labels", "plate"], []), (["labels"], ["plate"])]
+)
+def test_shared_label_pairs_with_irregular_columns(plate, sameby, diffby):
+    """Columns with missing or mixed values filter label pairs as in SQL."""
+    dframe = label_frame(4, empty=False)
+    dframe["plate"] = pd.Series(plate * (len(dframe) // 3), dtype=object)
+    args = (dframe, sameby, diffby, "labels")
+    got = matching.find_pairs_multilabel(*args)
+    expected = sql_pairs(*args)
+    np.testing.assert_array_equal(got[1], expected[1])
+    np.testing.assert_array_equal(got[2], expected[2])
+    assert as_set(got[0]) == as_set(expected[0])
+
+
 def test_array_label_cells_with_other_columns():
     """NumPy array cells work with other columns; only those reach DuckDB."""
     dframe = label_frame(3)
