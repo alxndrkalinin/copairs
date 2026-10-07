@@ -189,20 +189,10 @@ def average_precision(
     meta, columns = evaluate_and_filter(meta, columns)
     validate_pipeline_input(meta, feats, columns)
 
-    compute._check_method(method)
-    if method == "fast":
-        backend = fastap.resolve_backend(backend)
-        if backend == "numpy":
-            method = "legacy"
-
     # Get the distance function for similarity calculations (e.g., cosine)
-    similarity_fn = compute.get_similarity_fn(distance, progress_bar=progress_bar)
-    if method == "fast":
-        pair_similarity = fastap.pair_similarity(np.asarray(feats), distance, backend)
-        if pair_similarity is not None:
-
-            def similarity_fn(feats, pairs, batch_size):
-                return pair_similarity(pairs)
+    method, backend, similarity_fn = fastap.setup(
+        method, backend, feats, distance, progress_bar
+    )
 
     # Reset metadata index for consistent indexing
     meta = meta.reset_index(drop=True).copy()

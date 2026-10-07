@@ -11,6 +11,8 @@ each of its sorted positives, so no row is fully sorted.
 import numba
 import numpy as np
 
+from copairs.nulls import resolve_backend
+
 DEFAULT_BUDGET = 2**29
 
 
@@ -103,11 +105,9 @@ def draw_average_precisions(
     np.ndarray
         ``(n_draws, k)`` float64 APs.
     """
-    from copairs.fastap import resolve_backend
-
     backend = resolve_backend(backend)
     if backend == "numpy":
-        backend = "numba"
+        raise ValueError("draw_average_precisions has no NumPy backend; use numba")
     queries = np.asarray(queries, dtype=np.int64)
     references = np.asarray(references, dtype=np.int64)
     if queries.ndim != 2 or references.ndim != 2 or len(queries) != len(references):

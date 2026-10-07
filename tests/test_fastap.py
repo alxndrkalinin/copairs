@@ -171,3 +171,5 @@ def test_draw_average_precisions_validation():
         fastap.draw_average_precisions(
             np.zeros((4, 2)), [[0, 1]], [[2, 3]], backend="numba"
         )
+    with pytest.raises(ValueError):
+        fastap.draw_average_precisions(feats, [[0, 1]], [[2, 3]], backend="numpy")

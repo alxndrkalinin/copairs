@@ -8,6 +8,8 @@ many query-vs-reference draws at once.
 
 import numpy as np
 
+from copairs import compute
+from copairs.nulls import resolve_backend
 from copairs.fastap.draws import draw_average_precisions
 from copairs.fastap.ranking import ap_from_pairs
 from copairs.fastap.similarity import FAST_METRICS, PairSimilarity
@@ -19,14 +21,36 @@ __all__ = [
     "ap_from_pairs",
     "pair_similarity",
     "resolve_backend",
+    "setup",
 ]
 
 
-def resolve_backend(backend: str) -> str:
-    """Concrete backend for the AP stage: ``"cuda"``, ``"numba"`` or ``"numpy"``."""
-    from copairs.nulls import resolve_backend as resolve
+def setup(method: str, backend: str, feats, distance, progress_bar: bool):
+    """Resolve the AP stage's method and backend and pick its similarity function.
 
-    return resolve(backend)
+    ``backend="numpy"`` selects the legacy NumPy implementation. The returned
+    function has ``compute.get_similarity_fn``'s ``(feats, pairs, batch_size)``
+    signature and uses a kernel when ``distance`` has one.
+
+    Returns
+    -------
+    tuple
+        ``(method, backend, similarity_fn)``.
+    """
+    compute._check_method(method)
+    similarity_fn = compute.get_similarity_fn(distance, progress_bar=progress_bar)
+    if method == "legacy":
+        return method, backend, similarity_fn
+    backend = resolve_backend(backend)
+    if backend == "numpy":
+        return "legacy", backend, similarity_fn
+    kernel = pair_similarity(np.asarray(feats), distance, backend)
+    if kernel is not None:
+
+        def similarity_fn(feats, pairs, batch_size):
+            return kernel(pairs)
+
+    return method, backend, similarity_fn
 
 
 def pair_similarity(feats: np.ndarray, distance, backend: str):
