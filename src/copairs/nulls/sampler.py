@@ -31,7 +31,9 @@ except ImportError:  # pragma: no cover - exercised only without numba
 GUIDED_RATIO = 32
 # Algorithm A's own rounding bound, (2g + 2) eps, widens the undecidable band as
 # gaps grow; from totals of ~1e8 the last probes all fall in it and replay
-# O(g) products, so the plain loop is faster there.
+# O(g) products, so the plain loop is faster there. Checked first, the cap also
+# bounds k: GUIDED_RATIO * k * (k + 1) stays far inside int64, and the guided
+# condition implies k < 1449, so the k-term log1p sum errs by < 1e-11.
 GUIDED_MAX_TOTAL = 2**26
 # Bound on |log P(G > g) evaluated with log1p - log of Algorithm A's product|,
 # excluding the product's own rounding, when every factor is <= 1 - 2**-10.
