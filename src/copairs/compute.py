@@ -571,7 +571,7 @@ def get_null_dists(
         A 2D float32 array where each row corresponds to a null distribution for a
         specific configuration.
     """
-    check_method(method)
+    check_method(method, backend)
     if method == "legacy":
         return _get_null_dists_legacy(confs, null_size, seed, cache_dir, progress_bar)
     confs = np.asarray(confs)
@@ -651,7 +651,7 @@ def p_values(
     np.ndarray
         An array of p-values corresponding to the input AP scores.
     """
-    check_method(method)
+    check_method(method, backend)
     # Identify unique configurations and their indices
     confs, rev_ix = np.unique(null_confs, axis=0, return_inverse=True)
 

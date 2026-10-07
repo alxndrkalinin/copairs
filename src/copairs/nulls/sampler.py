@@ -19,6 +19,7 @@ import math
 import numba
 import numpy as np
 
+from copairs.methods import BACKENDS
 from copairs.nulls.philox import M32, S32, uniform53, philox4x32, config_key_arrays
 
 # Use the guided gap search when the expected gap exceeds this many times the
@@ -236,10 +237,8 @@ def resolve_backend(backend: str) -> str:
     available = available_backends()
     if backend == "auto":
         return available[0]
-    if backend not in ("cuda", "numba", "numpy"):
-        raise ValueError(
-            f"unknown backend {backend!r}; expected auto, cuda, numba or numpy"
-        )
+    if backend not in BACKENDS:
+        raise ValueError(f"unknown backend {backend!r}; expected one of {BACKENDS}")
     if backend not in available:
         raise ValueError(f"backend {backend!r} is not available here ({available})")
     return backend

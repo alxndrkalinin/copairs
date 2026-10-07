@@ -48,7 +48,7 @@ def setup(
     tuple
         ``(backend, similarity)``.
     """
-    check_method(method)
+    check_method(method, backend)
     generic = compute.get_similarity_fn(distance, progress_bar=progress_bar)
 
     def similarity(pairs):

@@ -124,6 +124,18 @@ def test_unknown_method():
         compute.get_null_dists(CONFS, 10, 0, method="exact")
 
 
+@pytest.mark.parametrize("method", ["fast", "legacy"])
+def test_unknown_backend(method, tmp_path):
+    """A misspelled backend raises under either method, though legacy ignores it."""
+    scores = np.full(len(CONFS), 0.5)
+    with pytest.raises(ValueError, match="unknown backend"):
+        compute.p_values(scores, CONFS, 10, 0, method=method, backend="cdua")
+    with pytest.raises(ValueError, match="unknown backend"):
+        compute.get_null_dists(
+            CONFS, 10, 0, cache_dir=tmp_path, method=method, backend="cdua"
+        )
+
+
 def test_map_fast_empty_input():
     """No valid AP scores give an empty result with the usual columns."""
     empty = pd.DataFrame(
