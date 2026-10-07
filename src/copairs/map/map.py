@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
 
-from copairs import compute
+from copairs import nulls, compute
 from copairs.methods import check_method
 from copairs.map.hierarchical_fdr import (
     apply_fdr_correction,
@@ -97,8 +97,6 @@ def get_map_pvalue(
     ]
 
     if method == "fast":
-        from copairs import nulls
-
         logger.info("Computing p-values...")
         # (group, configuration) member counts in CSR layout; groups are numbered
         # in map_scores' row order, and rows with missing keys belong to none.

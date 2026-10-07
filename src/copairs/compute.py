@@ -11,7 +11,9 @@ import numpy as np
 from scipy.spatial.distance import _METRICS_NAMES as SCIPY_METRICS_NAMES
 from scipy.spatial.distance import cdist
 
+from copairs import nulls
 from copairs.methods import check_method
+from copairs.nulls.pvalues import resolve_seed
 
 
 def parallel_map(
@@ -572,9 +574,6 @@ def get_null_dists(
     check_method(method)
     if method == "legacy":
         return _get_null_dists_legacy(confs, null_size, seed, cache_dir, progress_bar)
-    from copairs import nulls
-    from copairs.nulls.pvalues import resolve_seed
-
     confs = np.asarray(confs)
     if len(confs) == 0:
         return np.empty((0, null_size), dtype=np.float32)
@@ -656,8 +655,6 @@ def p_values(
     confs, rev_ix = np.unique(null_confs, axis=0, return_inverse=True)
 
     if method == "fast":
-        from copairs import nulls
-
         pvals = nulls.ap_pvalues(
             ap_scores,
             rev_ix.ravel(),

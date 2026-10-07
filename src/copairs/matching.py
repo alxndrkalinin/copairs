@@ -551,6 +551,7 @@ def _as_label_lists(labels: pd.Series) -> pd.Series:
 
 def _find_pairs_multilabel_fast(dframe, sameby, diffby, multilabel_col):
     """Inverted-index :func:`find_pairs_multilabel`, or None when unsupported."""
+    # Imported here: fastap.multilabel imports this module's find_pairs.
     from copairs.fastap import multilabel as fast
 
     if not isinstance(dframe, pd.DataFrame):
