@@ -15,6 +15,8 @@ copairs depends on widely used Python packages:
 * pandas
 * tqdm
 * statsmodels
+* duckdb
+* numba
 
 ### Installation
 
@@ -26,6 +28,18 @@ pip install copairs
 To also install dependencies for running examples, run:
 ```bash
 pip install copairs[demo]
+```
+
+#### GPU acceleration (optional)
+
+With [CuPy](https://cupy.dev) installed and a CUDA GPU visible, copairs runs
+null distributions, p-values, pair similarities and AP on the GPU
+(`backend="auto"` picks it). Install the CuPy wheel matching your driver, one
+of the two (the `ctk` extra brings the CUDA runtime and NVRTC, so no CUDA
+Toolkit is needed):
+```bash
+pip install "cupy-cuda12x[ctk]>=14"  # CUDA 12 drivers, any GPU from Maxwell on
+pip install "cupy-cuda13x[ctk]>=14"  # CUDA 13 drivers, compute capability >= 7.5
 ```
 
 ### Testing
@@ -43,6 +57,29 @@ We provide examples demonstrating how to use copairs for:
 - [calculating mAP to assess phenotypic activity of perturbations](https://github.com/cytomining/copairs/blob/main/docs/examples/phenotypic_activity.ipynb)
 - [calculating mAP to assess phenotypic consistency of perturbations](https://github.com/cytomining/copairs/blob/main/docs/examples/phenotypic_consistency.ipynb)
 - [estimating null size for mAP p-value calculation](https://github.com/cytomining/copairs/blob/main/docs/examples/null_size.ipynb)
+
+## Performance
+
+`average_precision`, `mean_average_precision` and the p-value functions take
+`method="fast"` (default) or `"legacy"`, and `backend="auto"`, `"cuda"`,
+`"numba"` or `"numpy"`.
+
+- Null distributions are sampled exactly (Philox counter-based RNG, Vitter's
+  Algorithm A) in O(1) memory per sample instead of permuting a
+  `null_size x total` matrix, and p-values are streamed in chunks. Sample `j`
+  of a `(num_pos, total)` null depends only on `(seed, num_pos, total, j)`, and
+  the NumPy, Numba and CUDA backends return identical samples.
+- AP is computed by counting, without sorting rank lists, and similarities by
+  per-pair kernels; multilabel pairs come from an inverted label index.
+- `copairs.fastap.draw_average_precisions` scores many query-vs-reference draws
+  in one batched call.
+
+Differences from `method="legacy"` (copairs <= 0.5.5): null samples come from a
+different random stream (p-values agree within Monte Carlo error); mAP p-values
+count null values `>=` the observed mAP, as in the paper, where legacy counted
+`>` and returned too small p-values when the mAP equals an atom of the null
+(e.g. perfect retrieval); and similarities from the kernels match the generic
+ones to float32 rounding, so near-tied pairs can rank differently.
 
 ## Citation
 If you find this work useful for your research, please cite our [paper](https://doi.org/10.1038/s41467-025-60306-2):
