@@ -103,6 +103,40 @@ def shared_label_pairs(dframe, sameby, diffby, multilabel_col):
     return pairs.astype(np.uint32), keys[present], counts[present]
 
 
+@numba.njit(cache=True)
+def _all_pairs_except(n, shared):
+    """Pairs ``(i < j)`` of ``range(n)`` whose key ``i * n + j`` is not in ``shared``.
+
+    ``shared`` is sorted and unique; candidates are generated in key order and
+    merged against it, so no candidate array is materialized.
+    """
+    out = np.empty((n * (n - 1) // 2 - len(shared), 2), dtype=np.uint32)
+    s = 0
+    w = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            if s < len(shared) and shared[s] == i * n + j:
+                s += 1
+                continue
+            out[w, 0] = i
+            out[w, 1] = j
+            w += 1
+    return out
+
+
+@numba.njit(cache=True)
+def _sorted_difference(candidates, shared):
+    """Elements of sorted ``candidates`` not in sorted ``shared`` (linear merge)."""
+    keep = np.ones(len(candidates), dtype=np.bool_)
+    s = 0
+    for c in range(len(candidates)):
+        while s < len(shared) and shared[s] < candidates[c]:
+            s += 1
+        if s < len(shared) and shared[s] == candidates[c]:
+            keep[c] = False
+    return candidates[keep]
+
+
 def disjoint_label_pairs(dframe, sameby, diffby, multilabel_col):
     """Sorted unique pairs ``(i < j)`` of rows sharing no label, or None."""
     found = multilabel_pairs(dframe, sameby, diffby, multilabel_col)
@@ -111,12 +145,9 @@ def disjoint_label_pairs(dframe, sameby, diffby, multilabel_col):
     _, pairs, _, mono, n = found
     shared = np.unique(pairs[:, 0] * n + pairs[:, 1])
     if mono is None:
-        i, j = np.triu_indices(n, 1)
-        candidates = i * n + j
-    else:
-        candidates = mono
-    candidates = candidates[~_in_sorted(candidates, shared)]
-    return np.stack([candidates // n, candidates % n], axis=1).astype(np.uint32)
+        return _all_pairs_except(n, shared)
+    kept = _sorted_difference(mono, shared)
+    return np.stack([kept // n, kept % n], axis=1).astype(np.uint32)
 
 
 @numba.njit(parallel=True, cache=True)
