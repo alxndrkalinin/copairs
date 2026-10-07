@@ -13,7 +13,7 @@ import numba
 import numpy as np
 import pandas as pd
 
-from copairs.fastap.ranking import rank_keys, _upper_bound
+from copairs.fastap.ranking import pair_csr, rank_keys, _upper_bound
 
 
 def label_members(labels: pd.Series):
@@ -115,25 +115,6 @@ def disjoint_label_pairs(dframe, sameby, diffby, multilabel_col, find_pairs):
     return np.stack([candidates // n, candidates % n], axis=1).astype(np.uint32)
 
 
-@numba.njit(cache=True)
-def _profile_csr(pairs, keys, n):
-    """Keys of each profile's pairs (both endpoints) in CSR layout, unsorted."""
-    ptr = np.zeros(n + 1, dtype=np.int64)
-    for p in range(len(pairs)):
-        ptr[pairs[p, 0] + 1] += 1
-        ptr[pairs[p, 1] + 1] += 1
-    for i in range(n):
-        ptr[i + 1] += ptr[i]
-    fill = ptr[:-1].copy()
-    vals = np.empty(2 * len(pairs), dtype=keys.dtype)
-    for p in range(len(pairs)):
-        for side in range(2):
-            i = pairs[p, side]
-            vals[fill[i]] = keys[p]
-            fill[i] += 1
-    return ptr, vals
-
-
 @numba.njit(parallel=True, cache=True)
 def _rows_ap(pos_ptr, pos_vals, row_profile, neg_ptr, neg_vals):
     """AP of rows with sorted positive keys and their profile's negatives."""
@@ -186,7 +167,7 @@ def multilabel_ap(pos_pairs, pos_sims, pos_counts, neg_pairs, neg_sims, n):
     rows, pos_start = np.unique(row_key, return_index=True)
     pos_ptr = np.append(pos_start, len(row_key)).astype(np.int64)
     neg_pairs = np.ascontiguousarray(neg_pairs, dtype=np.int64).reshape(-1, 2)
-    neg_ptr, neg_vals = _profile_csr(neg_pairs, rank_keys(neg_sims), n)
+    neg_ptr, neg_vals = pair_csr(neg_pairs, rank_keys(neg_sims), n)
     profile = rows % n
     ap, n_neg = _rows_ap(pos_ptr, end_keys, profile, neg_ptr, neg_vals)
     num_pos = np.diff(pos_ptr)

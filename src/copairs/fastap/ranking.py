@@ -32,8 +32,8 @@ def rank_keys(sims: np.ndarray) -> np.ndarray:
 
 
 @numba.njit(cache=True)
-def _positive_csr(pairs, keys, n):
-    """Positive keys of each profile, sorted, in CSR layout."""
+def pair_csr(pairs, keys, n):
+    """Keys of each profile's pairs (both endpoints) in CSR layout, unsorted."""
     ptr = np.zeros(n + 1, dtype=np.int64)
     for p in range(len(pairs)):
         ptr[pairs[p, 0] + 1] += 1
@@ -47,8 +47,19 @@ def _positive_csr(pairs, keys, n):
             i = pairs[p, side]
             vals[fill[i]] = keys[p]
             fill[i] += 1
-    for i in range(n):
+    return ptr, vals
+
+
+@numba.njit(parallel=True, cache=True)
+def _sort_segments(ptr, vals):
+    for i in numba.prange(len(ptr) - 1):
         vals[ptr[i] : ptr[i + 1]] = np.sort(vals[ptr[i] : ptr[i + 1]])
+
+
+def _positive_csr(pairs, keys, n):
+    """Positive keys of each profile, sorted, in CSR layout."""
+    ptr, vals = pair_csr(pairs, keys, n)
+    _sort_segments(ptr, vals)
     return ptr, vals
 
 
