@@ -2,9 +2,11 @@
 
 Cosine-type metrics normalize each profile once and then take one dot
 product per pair, instead of gathering and normalizing both rows of every
-pair. Dot products accumulate in float64 and are returned as float32, like
-``copairs.compute.get_similarity_fn``; results match it to float32 rounding,
-not bitwise.
+pair. Normalization and dot products run in float64 and results are returned
+as float32, like ``copairs.compute.get_similarity_fn``; results match it to
+float32 rounding, not bitwise. One exception: the generic functions compute in
+the input's precision, so float32 rows whose norms overflow float32 (entries
+around 1e19 and up) get similarity 0 or NaN there and their actual value here.
 """
 
 import numba

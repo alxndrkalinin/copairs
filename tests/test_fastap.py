@@ -193,3 +193,14 @@ def test_average_precision_rejects_numpy_backend():
     meta, feats = simulated_pipeline_input()
     with pytest.raises(ValueError, match="method='legacy'"):
         average_precision(meta, feats, backend="numpy", **PIPELINE, progress_bar=False)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_pair_similarity_float32_overflow(backend):
+    """Rows whose float32 norm overflows get their cosine, not the generic 0."""
+    feats = np.array(
+        [[1e20, 2e20, 0.0], [2e20, 1e20, 0.0], [1.0, 2.0, 0.0]], np.float32
+    )
+    pairs = np.array([[0, 1], [0, 2]])
+    got = fastap.pair_similarity(feats, "cosine", backend)(pairs)
+    np.testing.assert_allclose(got, [0.8, 1.0], rtol=1e-6)

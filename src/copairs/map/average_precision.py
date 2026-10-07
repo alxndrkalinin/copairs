@@ -151,8 +151,9 @@ def average_precision(
         other metrics use the generic path) and AP by counting, without
         sorting rank lists. AP values match ``"legacy"`` to float64 rounding
         for identical similarities; the kernels' similarities match to float32
-        rounding, so near-ties can order differently. ``"legacy"`` reproduces
-        copairs <= 0.5.5.
+        rounding, so near-ties can order differently (and, computed in
+        float64, stay finite for float32 rows whose norms overflow float32).
+        ``"legacy"`` reproduces copairs <= 0.5.5.
 
     backend : str
         ``"auto"``, ``"cuda"`` or ``"numba"`` for the fast method (the NumPy

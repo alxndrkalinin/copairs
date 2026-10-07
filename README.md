@@ -79,7 +79,9 @@ different random stream (p-values agree within Monte Carlo error); mAP p-values
 count null values `>=` the observed mAP, as in the paper, where legacy counted
 `>` and returned too small p-values when the mAP equals an atom of the null
 (e.g. perfect retrieval); and similarities from the kernels match the generic
-ones to float32 rounding, so near-tied pairs can rank differently.
+ones to float32 rounding, so near-tied pairs can rank differently. The kernels
+compute in float64, so float32 profiles whose norms overflow float32 (entries
+around 1e19 and up) get their actual similarity instead of the generic 0 or NaN.
 
 ## Citation
 If you find this work useful for your research, please cite our [paper](https://doi.org/10.1038/s41467-025-60306-2):
