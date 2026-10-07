@@ -21,38 +21,43 @@ def label_members(labels: pd.Series):
     """Sorted distinct labels and the CSR of rows holding each, or None."""
     if not all(isinstance(v, (list, tuple, np.ndarray)) for v in labels):
         return None
-    sizes = np.array([len(v) for v in labels], dtype=np.int64)
-    flat = pd.Series([x for v in labels for x in v], dtype=object)
-    if flat.isna().any():
+    flat = labels.reset_index(drop=True).explode()
+    values = flat.to_numpy()
+    missing = pd.isna(values)
+    # explode gives one missing value per empty cell; any other is a None/NaN label.
+    if missing.sum() != (labels.map(len) == 0).sum():
         return None
-    rows = np.repeat(np.arange(len(labels)), sizes)
+    values, rows = values[~missing], flat.index.to_numpy()[~missing]
     try:
-        keys, inv = np.unique(flat.to_numpy(), return_inverse=True)
+        inv, keys = pd.factorize(values, sort=True)
     except TypeError:  # labels of mixed, unorderable types
         return None
+    keys = np.asarray(keys, dtype=object)
     if len({type(k) for k in keys}) > 1:
         return None
     if len(keys) and not isinstance(keys[0], str):
         keys = np.array(keys.tolist())  # numeric labels as a numeric array, like SQL
-    order = np.lexsort((rows, inv))
-    rows, inv = rows[order], inv[order]
-    if (np.diff(inv * len(labels) + rows) == 0).any():
+    row_key = inv.astype(np.int64) * len(labels) + rows
+    order = np.argsort(row_key, kind="stable")
+    if (np.diff(row_key[order]) == 0).any():
         return None  # a row lists the same label twice
-    ptr = np.searchsorted(inv, np.arange(len(keys) + 1))
-    return keys, ptr, rows
+    ptr = np.searchsorted(inv[order], np.arange(len(keys) + 1))
+    return keys, ptr, rows[order]
 
 
 def _label_pairs(ptr, rows):
-    """Pairs ``(i < j)`` of rows sharing each label, grouped by label."""
-    pairs, label = [], []
-    for c in range(len(ptr) - 1):
-        members = rows[ptr[c] : ptr[c + 1]]
-        a, b = np.triu_indices(len(members), 1)
-        pairs.append(np.stack([members[a], members[b]], axis=1))
-        label.append(np.full(len(a), c))
-    if not pairs:
-        return np.empty((0, 2), dtype=np.int64), np.empty(0, dtype=np.int64)
-    return np.concatenate(pairs), np.concatenate(label)
+    """Pairs ``(i < j)`` of rows sharing each label, grouped by label.
+
+    Within a label, pairs are in ``np.triu_indices`` order of its sorted rows.
+    """
+    size = np.diff(ptr)
+    local = np.arange(len(rows)) - np.repeat(ptr[:-1], size)
+    later = np.repeat(size, size) - 1 - local  # members after each one in its label
+    first = np.repeat(np.arange(len(rows)), later)
+    step = np.arange(len(first)) - np.repeat(np.cumsum(later) - later, later)
+    pairs = np.stack([rows[first], rows[first + 1 + step]], axis=1)
+    label = np.repeat(np.repeat(np.arange(len(size)), size), later)
+    return pairs, label
 
 
 def _in_sorted(keys, sorted_keys):
