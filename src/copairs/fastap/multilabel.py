@@ -43,7 +43,10 @@ def label_members(labels: pd.Series):
     if len({type(k) for k in keys}) > 1:
         return None
     if len(keys) and not isinstance(keys[0], str):
-        keys = np.array(keys.tolist())  # numeric labels as a numeric array, like SQL
+        # Numeric labels as a numeric array, like SQL; DuckDB stores Python ints
+        # as INTEGER while they all fit.
+        fits = type(keys[0]) is int and -(2**31) <= keys[0] and keys[-1] < 2**31
+        keys = np.array(keys.tolist(), dtype=np.int32 if fits else None)
     row_key = inv.astype(np.int64) * len(labels) + rows
     order = np.argsort(row_key, kind="stable")
     if (np.diff(row_key[order]) == 0).any():

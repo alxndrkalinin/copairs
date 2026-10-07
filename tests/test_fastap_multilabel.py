@@ -157,9 +157,12 @@ CONSISTENCY = dict(
 
 
 @pytest.mark.parametrize("backend", ["numba"])
-def test_multilabel_ap_matches_legacy(backend):
-    """Per-label APs equal the legacy loop for the same similarities."""
+@pytest.mark.parametrize("int_labels", [False, True])
+def test_multilabel_ap_matches_legacy(backend, int_labels):
+    """Per-label APs and label column equal the legacy loop's."""
     dframe, feats = consistency_input()
+    if int_labels:
+        dframe["labels"] = dframe["labels"].map(lambda v: [int(x) for x in v])
 
     kwargs = dict(
         CONSISTENCY,
@@ -177,11 +180,21 @@ def test_multilabel_ap_matches_legacy(backend):
         np.testing.assert_allclose(fast[col], legacy[col], rtol=1e-12, atol=1e-15)
 
 
-def test_numeric_label_keys():
-    """Integer labels give integer keys, equal to the SQL path's."""
-    dframe = pd.DataFrame({"labels": [[1, 2], [2], [1, 3], [3]]})
+@pytest.mark.parametrize(
+    "big,array_dtype", [(2, None), (2**31 - 1, None), (2**31, None), (2, np.int32)]
+)
+def test_numeric_label_keys(big, array_dtype):
+    """Integer labels give keys of the SQL path's values and dtype.
+
+    DuckDB stores Python ints as int32 while they fit, and keeps the dtype of
+    NumPy label arrays.
+    """
+    labels = [[1, big], [big], [1, 3], [3]]
+    if array_dtype is not None:
+        labels = [np.array(v, dtype=array_dtype) for v in labels]
+    dframe = pd.DataFrame({"labels": labels})
     _, keys, counts = matching.find_pairs_multilabel(dframe, ["labels"], [], "labels")
     _, sql_keys, sql_counts = sql_pairs(dframe, ["labels"], [], "labels")
-    assert np.issubdtype(keys.dtype, np.integer)
+    assert keys.dtype == np.asarray(sql_keys).dtype
     np.testing.assert_array_equal(keys, sql_keys)
     np.testing.assert_array_equal(counts, sql_counts)

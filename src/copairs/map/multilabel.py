@@ -146,6 +146,11 @@ def average_precision(
         label, ix, ap, num_pos, total = fast_multilabel.multilabel_ap(
             pos_pairs, pos_sims, pos_counts, neg_pairs, neg_sims, len(meta)
         )
+        # The legacy per-label frames broadcast each key: NumPy keys keep their
+        # dtype, strings make a str column (from a list, not an object array).
+        label_values = np.asarray(keys)[label]
+        if label_values.dtype == object:
+            label_values = label_values.tolist()
         results = pd.DataFrame(
             {
                 "average_precision": ap,
@@ -155,8 +160,7 @@ def average_precision(
                 "n_pos_pairs": num_pos,
                 "n_total_pairs": total,
                 "ix": ix,
-                # A list, as the legacy per-label frames give, for the same dtype.
-                multilabel_col: np.asarray(keys)[label].tolist(),
+                multilabel_col: label_values,
             }
         )
         return _merge_results(meta, results, multilabel_col)
