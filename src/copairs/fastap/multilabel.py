@@ -13,7 +13,7 @@ import numba
 import numpy as np
 import pandas as pd
 
-from copairs.fastap.ranking import pair_csr, rank_keys, _upper_bound
+from copairs.fastap.ranking import pair_csr, rank_keys, _upper_bound, ap_from_counts
 
 
 def label_members(labels: pd.Series):
@@ -128,12 +128,7 @@ def _rows_ap(pos_ptr, pos_vals, row_profile, neg_ptr, neg_vals):
         hist = np.zeros(num_pos + 1, dtype=np.int64)
         for e in range(neg_ptr[i], neg_ptr[i + 1]):
             hist[_upper_bound(pos_vals, lo, hi, neg_vals[e]) - lo] += 1
-        before = 0
-        acc = 0.0
-        for t in range(num_pos):
-            before += hist[t]
-            acc += (t + 1) / (t + 1 + before)
-        ap[r] = acc / num_pos
+        ap[r] = ap_from_counts(hist, 0, num_pos)
         n_neg[r] = neg_ptr[i + 1] - neg_ptr[i]
     return ap, n_neg
 

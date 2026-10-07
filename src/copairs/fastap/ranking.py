@@ -63,6 +63,17 @@ def _positive_csr(pairs, keys, n):
     return ptr, vals
 
 
+@numba.njit(inline="always")
+def ap_from_counts(hist, base, num_pos):
+    """AP given ``hist[base + t]`` negatives ranked between positives t - 1 and t."""
+    before = 0
+    acc = 0.0
+    for t in range(num_pos):
+        before += hist[base + t]
+        acc += (t + 1) / (t + 1 + before)
+    return acc / num_pos
+
+
 @numba.njit(parallel=True, cache=True)
 def _negative_hist(neg_pairs, neg_keys, ptr, vals, n, n_chunks):
     """Per-profile histograms of negatives over the gaps between positive keys.
@@ -93,13 +104,7 @@ def _ap_from_hist(ptr, hist, n):
         if num_pos == 0:
             ap[i] = np.nan
             continue
-        base = ptr[i] + i
-        before = 0
-        acc = 0.0
-        for t in range(num_pos):
-            before += hist[base + t]
-            acc += (t + 1) / (t + 1 + before)
-        ap[i] = acc / num_pos
+        ap[i] = ap_from_counts(hist, ptr[i] + i, num_pos)
     return ap
 
 

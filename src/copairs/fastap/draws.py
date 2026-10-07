@@ -12,6 +12,7 @@ import numba
 import numpy as np
 
 from copairs.nulls import resolve_backend
+from copairs.fastap.ranking import ap_from_counts
 
 DEFAULT_BUDGET = 2**29
 
@@ -62,12 +63,7 @@ def _row_ap(sims, k, out):
                 else:
                     hi = mid
             hist[lo] += 1
-        before = 0
-        acc = 0.0
-        for t in range(k - 1):
-            before += hist[t]
-            acc += (t + 1) / (t + 1 + before)
-        out[row] = acc / (k - 1)
+        out[row] = ap_from_counts(hist, 0, k - 1)
 
 
 def _chunk(n_draws: int, k: int, m: int, d: int, budget_bytes: int) -> int:
