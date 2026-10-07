@@ -13,6 +13,7 @@ import numba
 import numpy as np
 import pandas as pd
 
+from copairs.matching import find_pairs
 from copairs.fastap.ranking import pair_csr, rank_keys, _upper_bound, ap_from_counts
 
 
@@ -61,16 +62,14 @@ def _in_sorted(keys, sorted_keys):
     return sorted_keys[loc] == keys
 
 
-def multilabel_pairs(dframe, sameby, diffby, multilabel_col, find_pairs):
+def multilabel_pairs(dframe, sameby, diffby, multilabel_col):
     """Fast :func:`copairs.matching.find_pairs_multilabel`, or None if unsupported.
 
     ``sameby`` and ``diffby`` exclude ``multilabel_col``. Returns the same pair
     set as the SQL implementation, with pairs sorted by label (sameby) or by
     ``(i, j)`` (diffby).
     """
-    if not isinstance(dframe, pd.DataFrame) or not dframe.index.equals(
-        pd.RangeIndex(len(dframe))
-    ):
+    if not dframe.index.equals(pd.RangeIndex(len(dframe))):
         return None
     members = label_members(dframe[multilabel_col])
     if members is None:
@@ -85,9 +84,9 @@ def multilabel_pairs(dframe, sameby, diffby, multilabel_col, find_pairs):
     return keys, pairs, label, mono, n
 
 
-def shared_label_pairs(dframe, sameby, diffby, multilabel_col, find_pairs):
+def shared_label_pairs(dframe, sameby, diffby, multilabel_col):
     """``(pairs, keys, counts)`` of rows sharing a label, or None."""
-    found = multilabel_pairs(dframe, sameby, diffby, multilabel_col, find_pairs)
+    found = multilabel_pairs(dframe, sameby, diffby, multilabel_col)
     if found is None:
         return None
     keys, pairs, label, mono, n = found
@@ -99,9 +98,9 @@ def shared_label_pairs(dframe, sameby, diffby, multilabel_col, find_pairs):
     return pairs.astype(np.uint32), keys[present], counts[present]
 
 
-def disjoint_label_pairs(dframe, sameby, diffby, multilabel_col, find_pairs):
+def disjoint_label_pairs(dframe, sameby, diffby, multilabel_col):
     """Sorted unique pairs ``(i < j)`` of rows sharing no label, or None."""
-    found = multilabel_pairs(dframe, sameby, diffby, multilabel_col, find_pairs)
+    found = multilabel_pairs(dframe, sameby, diffby, multilabel_col)
     if found is None:
         return None
     _, pairs, _, mono, n = found

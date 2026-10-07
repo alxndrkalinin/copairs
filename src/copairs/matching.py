@@ -556,12 +556,8 @@ def _find_pairs_multilabel_fast(dframe, sameby, diffby, multilabel_col):
     rest_same = [c for c in sameby if c != multilabel_col]
     rest_diff = [c for c in diffby if c != multilabel_col]
     if multilabel_col in sameby:
-        return fast.shared_label_pairs(
-            dframe, rest_same, rest_diff, multilabel_col, find_pairs
-        )
-    return fast.disjoint_label_pairs(
-        dframe, rest_same, rest_diff, multilabel_col, find_pairs
-    )
+        return fast.shared_label_pairs(dframe, rest_same, rest_diff, multilabel_col)
+    return fast.disjoint_label_pairs(dframe, rest_same, rest_diff, multilabel_col)
 
 
 def find_pairs_multilabel(
