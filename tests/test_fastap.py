@@ -119,10 +119,7 @@ def test_average_precision_fast_ap_stage(backend):
     """With the same similarities, fast and legacy pipelines agree to rounding."""
     meta, feats = simulated_pipeline_input()
 
-    def cosine(x, y):
-        return compute.pairwise_cosine(x, y)
-
-    kwargs = dict(PIPELINE, distance=cosine, progress_bar=False)
+    kwargs = dict(PIPELINE, distance=compute.pairwise_cosine, progress_bar=False)
     fast = average_precision(meta, feats, backend=backend, **kwargs)
     legacy = average_precision(meta, feats, method="legacy", **kwargs)
     for col in ["n_pos_pairs", "n_total_pairs"]:

@@ -161,11 +161,11 @@ def test_multilabel_ap_matches_legacy(backend):
     """Per-label APs equal the legacy loop for the same similarities."""
     dframe, feats = consistency_input()
 
-    def cosine(x, y):
-        return compute.pairwise_cosine(x, y)
-
     kwargs = dict(
-        CONSISTENCY, multilabel_col="labels", distance=cosine, progress_bar=False
+        CONSISTENCY,
+        multilabel_col="labels",
+        distance=compute.pairwise_cosine,
+        progress_bar=False,
     )
     fast = multilabel.average_precision(dframe, feats, backend=backend, **kwargs)
     legacy = multilabel.average_precision(dframe, feats, method="legacy", **kwargs)
