@@ -75,7 +75,7 @@ def _in_sorted(keys, sorted_keys):
 
 
 def multilabel_pairs(dframe, multilabel_col):
-    """``(keys, pairs, label, n)`` of rows sharing each label, or None if unsupported.
+    """``(keys, pairs, label)`` of rows sharing each label, or None if unsupported.
 
     Pairs are grouped by label (see :func:`_label_pairs`).
     """
@@ -86,7 +86,7 @@ def multilabel_pairs(dframe, multilabel_col):
         return None
     keys, ptr, rows = members
     pairs, label = _label_pairs(ptr, rows)
-    return keys, pairs, label, len(dframe)
+    return keys, pairs, label
 
 
 def _monolabel_keys(dframe, sameby, diffby):
@@ -139,7 +139,7 @@ def shared_label_pairs(dframe, sameby, diffby, multilabel_col):
     found = multilabel_pairs(dframe, multilabel_col)
     if found is None:
         return None
-    keys, pairs, label, _ = found
+    keys, pairs, label = found
     if len(sameby) or len(diffby):
         keep = _monolabel_mask(dframe, sameby, diffby, multilabel_col, pairs)
         pairs, label = pairs[keep], label[keep]
@@ -187,7 +187,8 @@ def disjoint_label_pairs(dframe, sameby, diffby, multilabel_col):
     found = multilabel_pairs(dframe, multilabel_col)
     if found is None:
         return None
-    _, pairs, _, n = found
+    _, pairs, _ = found
+    n = len(dframe)
     shared = np.unique(pairs[:, 0] * n + pairs[:, 1])
     if not (len(sameby) or len(diffby)):
         return _all_pairs_except(n, shared)
