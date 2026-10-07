@@ -21,6 +21,8 @@ FAST_METRICS = (
 
 
 _ROW_BLOCK = 8192
+# Pairs per kernel call; bounds the int64 copy of the pair indices.
+PAIR_CHUNK = 1 << 24
 
 
 def _unit_rows(feats: np.ndarray, center: bool) -> np.ndarray:
@@ -96,14 +98,24 @@ class PairSimilarity:
             self.x = np.ascontiguousarray(feats)
 
     def __call__(self, pairs: np.ndarray) -> np.ndarray:
-        """float32 similarity of each ``(i, j)`` row of ``pairs``."""
-        pairs = np.ascontiguousarray(pairs, dtype=np.int64).reshape(-1, 2)
-        out = np.empty(len(pairs), dtype=np.float64)
-        if self.metric in ("cosine", "abs_cosine", "correlation"):
-            _dot_pairs(self.x, pairs, out)
-            if self.metric == "abs_cosine":
-                np.abs(out, out=out)
-        else:
-            kind = ("euclidean", "manhattan", "chebyshev").index(self.metric)
-            _minkowski_pairs(self.x, pairs, kind, out)
-        return out.astype(np.float32)
+        """float32 similarity of each ``(i, j)`` row of ``pairs``.
+
+        Pairs are converted to int64 a chunk at a time, and the kernels round
+        each float64 result into the float32 output, so no full-size temporary
+        is built.
+        """
+        pairs = np.asarray(pairs).reshape(-1, 2)
+        out = np.empty(len(pairs), dtype=np.float32)
+        for start in range(0, len(pairs), PAIR_CHUNK):
+            chunk = np.ascontiguousarray(
+                pairs[start : start + PAIR_CHUNK], dtype=np.int64
+            )
+            dest = out[start : start + PAIR_CHUNK]
+            if self.metric in ("cosine", "abs_cosine", "correlation"):
+                _dot_pairs(self.x, chunk, dest)
+            else:
+                kind = ("euclidean", "manhattan", "chebyshev").index(self.metric)
+                _minkowski_pairs(self.x, chunk, kind, dest)
+        if self.metric == "abs_cosine":
+            np.abs(out, out=out)
+        return out

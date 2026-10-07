@@ -4,6 +4,7 @@ import numpy as np
 
 from copairs.nulls import cuda as _null_cuda
 from copairs.fastap.ranking import sortable_keys
+from copairs.fastap.similarity import PAIR_CHUNK
 
 cp = _null_cuda.cp
 _BLOCK = _null_cuda._BLOCK
@@ -16,18 +17,18 @@ __device__ __forceinline__ bool le(float v, float key) {
 }
 
 template <typename T>
-__device__ void dot_pairs(const T* x, long long d, const long long* pairs, long long n,
-                          double* out) {
+__device__ void dot_pairs(const T* x, long long d, const unsigned int* pairs, long long n,
+                          float* out) {
     int lane = threadIdx.x & 31;
     long long warp = (blockIdx.x * (long long)blockDim.x + threadIdx.x) >> 5;
     long long n_warps = ((long long)gridDim.x * blockDim.x) >> 5;
     for (long long p = warp; p < n; p += n_warps) {
-        const T* a = x + pairs[2 * p] * d;
-        const T* b = x + pairs[2 * p + 1] * d;
+        const T* a = x + (long long)pairs[2 * p] * d;
+        const T* b = x + (long long)pairs[2 * p + 1] * d;
         double acc = 0.0;
         for (long long t = lane; t < d; t += 32) acc += (double)a[t] * (double)b[t];
         for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, off);
-        if (lane == 0) out[p] = acc;
+        if (lane == 0) out[p] = (float)acc;
     }
 }
 
@@ -38,14 +39,14 @@ __device__ __forceinline__ double nan_max(double a, double b) {
 
 // 1 / (1 + distance); kind 0 = euclidean, 1 = manhattan, 2 = chebyshev.
 template <typename T>
-__device__ void minkowski_pairs(const T* x, long long d, const long long* pairs, long long n,
-                                int kind, double* out) {
+__device__ void minkowski_pairs(const T* x, long long d, const unsigned int* pairs, long long n,
+                                int kind, float* out) {
     int lane = threadIdx.x & 31;
     long long warp = (blockIdx.x * (long long)blockDim.x + threadIdx.x) >> 5;
     long long n_warps = ((long long)gridDim.x * blockDim.x) >> 5;
     for (long long p = warp; p < n; p += n_warps) {
-        const T* a = x + pairs[2 * p] * d;
-        const T* b = x + pairs[2 * p + 1] * d;
+        const T* a = x + (long long)pairs[2 * p] * d;
+        const T* b = x + (long long)pairs[2 * p + 1] * d;
         double acc = 0.0;
         for (long long t = lane; t < d; t += 32) {
             double diff = fabs((double)a[t] - (double)b[t]);
@@ -55,32 +56,32 @@ __device__ void minkowski_pairs(const T* x, long long d, const long long* pairs,
             double other = __shfl_down_sync(0xffffffffu, acc, off);
             acc = kind == 2 ? nan_max(acc, other) : acc + other;
         }
-        if (lane == 0) out[p] = 1.0 / (1.0 + (kind == 0 ? sqrt(acc) : acc));
+        if (lane == 0) out[p] = (float)(1.0 / (1.0 + (kind == 0 ? sqrt(acc) : acc)));
     }
 }
 
-extern "C" __global__ void dot_pairs_f32(const float* x, long long d, const long long* pairs,
-                                         long long n, double* out) {
+extern "C" __global__ void dot_pairs_f32(const float* x, long long d, const unsigned int* pairs,
+                                         long long n, float* out) {
     dot_pairs<float>(x, d, pairs, n, out);
 }
-extern "C" __global__ void dot_pairs_f64(const double* x, long long d, const long long* pairs,
-                                         long long n, double* out) {
+extern "C" __global__ void dot_pairs_f64(const double* x, long long d, const unsigned int* pairs,
+                                         long long n, float* out) {
     dot_pairs<double>(x, d, pairs, n, out);
 }
 extern "C" __global__ void minkowski_pairs_f32(const float* x, long long d,
-                                               const long long* pairs, long long n, int kind,
-                                               double* out) {
+                                               const unsigned int* pairs, long long n, int kind,
+                                               float* out) {
     minkowski_pairs<float>(x, d, pairs, n, kind, out);
 }
 extern "C" __global__ void minkowski_pairs_f64(const double* x, long long d,
-                                               const long long* pairs, long long n, int kind,
-                                               double* out) {
+                                               const unsigned int* pairs, long long n, int kind,
+                                               float* out) {
     minkowski_pairs<double>(x, d, pairs, n, kind, out);
 }
 
 // For both endpoints i of each negative pair, count it in bin ptr[i] + i + q, where
 // q = #{positive keys of i <= key}.
-extern "C" __global__ void negative_hist(const long long* neg_pairs, const float* keys,
+extern "C" __global__ void negative_hist(const unsigned int* neg_pairs, const float* keys,
                                          long long n_neg, const long long* ptr,
                                          const float* vals, unsigned long long* hist,
                                          unsigned long long* n_negative) {
@@ -121,8 +122,9 @@ def _kernel(name: str):
 
 
 def device_pairs(pairs):
-    """Contiguous int64 ``(n, 2)`` pairs on the device, cast there, not on the host."""
-    return cp.ascontiguousarray(cp.asarray(pairs).reshape(-1, 2).astype(cp.int64))
+    """Contiguous uint32 ``(n, 2)`` pairs on the device (indices are < 2**32)."""
+    pairs = cp.asarray(pairs).reshape(-1, 2)
+    return cp.ascontiguousarray(pairs.astype(cp.uint32, copy=False))
 
 
 class PairSimilarity:
@@ -134,24 +136,23 @@ class PairSimilarity:
         self.suffix = "f64" if self.x.dtype == cp.float64 else "f32"
 
     def __call__(self, pairs, as_numpy: bool = True):
-        """float32 similarity of each ``(i, j)`` row of ``pairs``."""
-        pairs = device_pairs(pairs)
-        n, d = len(pairs), self.x.shape[1]
-        out = cp.empty(n, dtype=cp.float64)
-        if n:
-            grid = (_grid(32 * n),)
+        """float32 similarity of each ``(i, j)`` row of ``pairs``, a chunk at a time."""
+        d = self.x.shape[1]
+        out = cp.empty(len(pairs), dtype=cp.float32)
+        for start in range(0, len(pairs), PAIR_CHUNK):
+            chunk = device_pairs(pairs[start : start + PAIR_CHUNK])
+            n = len(chunk)
+            dest = out[start : start + n]
             if self.metric in ("cosine", "abs_cosine", "correlation"):
-                args = (self.x, np.int64(d), pairs, np.int64(n), out)
-                _kernel(f"dot_pairs_{self.suffix}")(grid, (_BLOCK,), args)
-                if self.metric == "abs_cosine":
-                    cp.abs(out, out=out)
+                args = (self.x, np.int64(d), chunk, np.int64(n), dest)
+                name = f"dot_pairs_{self.suffix}"
             else:
-                kind = np.int32(
-                    ("euclidean", "manhattan", "chebyshev").index(self.metric)
-                )
-                args = (self.x, np.int64(d), pairs, np.int64(n), kind, out)
-                _kernel(f"minkowski_pairs_{self.suffix}")(grid, (_BLOCK,), args)
-        out = out.astype(cp.float32)
+                kind = ("euclidean", "manhattan", "chebyshev").index(self.metric)
+                args = (self.x, np.int64(d), chunk, np.int64(n), np.int32(kind), dest)
+                name = f"minkowski_pairs_{self.suffix}"
+            _kernel(name)((_grid(32 * n),), (_BLOCK,), args)
+        if self.metric == "abs_cosine":
+            cp.abs(out, out=out)
         return out.get() if as_numpy else out
 
 
@@ -163,7 +164,9 @@ def ap_from_pairs(pos_pairs, neg_pairs, pos_keys, neg_keys, n: int):
     keys = cp.repeat(cp.asarray(pos_keys, dtype=cp.float32), 2)
     order = cp.argsort((profile.astype(cp.uint64) << 32) | sortable_keys(keys))
     vals = cp.ascontiguousarray(keys[order])
-    ptr = cp.searchsorted(profile[order], cp.arange(n + 1, dtype=cp.int64))
+    ptr = cp.searchsorted(
+        profile[order].astype(cp.int64), cp.arange(n + 1, dtype=cp.int64)
+    )
     hist = cp.zeros(int(ptr[-1]) + n, dtype=cp.uint64)
     n_neg = cp.zeros(n, dtype=cp.uint64)
     if len(neg_pairs):
