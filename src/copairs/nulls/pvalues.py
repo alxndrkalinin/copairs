@@ -9,9 +9,10 @@ rounding between the two computations, so a null rank list identical to the
 observed one is counted as a tie, as in the paper's ``>=`` definition.
 """
 
+import numba
 import numpy as np
 
-from copairs.nulls.sampler import numba, _ap_nulls, resolve_backend
+from copairs.nulls.sampler import _ap_nulls, resolve_backend
 
 # Far above float64 summation-order differences of an AP (~k * 2**-52). Distinct
 # AP values can lie closer than this in larger configurations (e.g. 9e-13 apart
@@ -143,29 +144,27 @@ def _group_ge_host(null, ptr, conf_ix, conf_cnt, n_group, thr, counts):
         counts[g] += np.count_nonzero(acc / n_group[g] >= thr[g])
 
 
-if numba is not None:
-
-    @numba.njit(parallel=True, cache=True)
-    def _group_ge_numba(null, ptr, conf_ix, conf_cnt, n_group, thr, counts):
-        n_groups = len(ptr) - 1
-        size = null.shape[1]
-        block = 1 << 14
-        n_blocks = (size + block - 1) // block
-        partial = np.zeros(n_groups * n_blocks, dtype=np.int64)
-        for flat in numba.prange(n_groups * n_blocks):
-            g = flat // n_blocks
-            t0 = (flat - g * n_blocks) * block
-            t1 = min(t0 + block, size)
-            hits = 0
-            for t in range(t0, t1):
-                acc = 0.0
-                for e in range(ptr[g], ptr[g + 1]):
-                    acc += conf_cnt[e] * null[conf_ix[e], t]
-                if acc / n_group[g] >= thr[g]:
-                    hits += 1
-            partial[flat] = hits
-        for g in range(n_groups):
-            counts[g] += partial[g * n_blocks : (g + 1) * n_blocks].sum()
+@numba.njit(parallel=True, cache=True)
+def _group_ge_numba(null, ptr, conf_ix, conf_cnt, n_group, thr, counts):
+    n_groups = len(ptr) - 1
+    size = null.shape[1]
+    block = 1 << 14
+    n_blocks = (size + block - 1) // block
+    partial = np.zeros(n_groups * n_blocks, dtype=np.int64)
+    for flat in numba.prange(n_groups * n_blocks):
+        g = flat // n_blocks
+        t0 = (flat - g * n_blocks) * block
+        t1 = min(t0 + block, size)
+        hits = 0
+        for t in range(t0, t1):
+            acc = 0.0
+            for e in range(ptr[g], ptr[g + 1]):
+                acc += conf_cnt[e] * null[conf_ix[e], t]
+            if acc / n_group[g] >= thr[g]:
+                hits += 1
+        partial[flat] = hits
+    for g in range(n_groups):
+        counts[g] += partial[g * n_blocks : (g + 1) * n_blocks].sum()
 
 
 def map_pvalues(

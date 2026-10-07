@@ -16,15 +16,10 @@ Numba and CUDA implementations return bitwise-identical nulls.
 
 import math
 
+import numba
 import numpy as np
 
 from copairs.nulls.philox import M32, S32, uniform53, config_key, philox4x32
-
-try:
-    import numba
-except ImportError:  # pragma: no cover - exercised only without numba
-    numba = None
-
 
 # Use the guided gap search when the expected gap exceeds this many times the
 # number of remaining positives (its cost per probe); results are identical.
@@ -206,31 +201,29 @@ def _ap_null_numpy(num_pos, total, start, size, k0, k1):
     return acc / num_pos
 
 
-if numba is not None:
-    _gap_loop_nb = numba.njit(cache=True)(gap_loop)
-    _ap_sample_nb = numba.njit(cache=True)(
-        _make_ap_sample(
-            numba.njit(inline="always")(philox4x32),
-            numba.njit(inline="always")(uniform53),
-            _gap_loop_nb,
-            numba.njit(cache=True)(_make_gap_guided(_gap_loop_nb, numba.njit)),
-        )
+_gap_loop_nb = numba.njit(cache=True)(gap_loop)
+_ap_sample_nb = numba.njit(cache=True)(
+    _make_ap_sample(
+        numba.njit(inline="always")(philox4x32),
+        numba.njit(inline="always")(uniform53),
+        _gap_loop_nb,
+        numba.njit(cache=True)(_make_gap_guided(_gap_loop_nb, numba.njit)),
     )
+)
 
-    @numba.njit(parallel=True, cache=True)
-    def _ap_nulls_numba(num_pos, total, k0, k1, start, out):
-        n_conf, size = out.shape
-        for flat in numba.prange(n_conf * size):
-            c = flat // size
-            t = flat - c * size
-            out[c, t] = _ap_sample_nb(num_pos[c], total[c], start + t, k0[c], k1[c])
+
+@numba.njit(parallel=True, cache=True)
+def _ap_nulls_numba(num_pos, total, k0, k1, start, out):
+    n_conf, size = out.shape
+    for flat in numba.prange(n_conf * size):
+        c = flat // size
+        t = flat - c * size
+        out[c, t] = _ap_sample_nb(num_pos[c], total[c], start + t, k0[c], k1[c])
 
 
 def available_backends() -> list[str]:
     """Backends usable in this environment, fastest first."""
-    backends = ["numpy"]
-    if numba is not None:
-        backends.insert(0, "numba")
+    backends = ["numba", "numpy"]
     from copairs.nulls import cuda
 
     if cuda.is_available():
