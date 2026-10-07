@@ -125,6 +125,8 @@ def ap_from_pairs(
     pos_pairs = np.ascontiguousarray(pos_pairs, dtype=np.int64).reshape(-1, 2)
     neg_pairs = np.ascontiguousarray(neg_pairs, dtype=np.int64).reshape(-1, 2)
     n = int(max(pos_pairs.max(initial=-1), neg_pairs.max(initial=-1))) + 1
+    if backend == "cuda" and n >= 2**32:
+        backend = "numba"  # the GPU sort packs profile indices into 32 bits
     if backend == "cuda":
         from copairs.fastap import cuda
 
