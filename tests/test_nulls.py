@@ -266,3 +266,12 @@ def test_config_key_arrays_match_scalar(seed):
     np.testing.assert_array_equal(
         np.stack([k0, k1], axis=1), np.array(expected, dtype=np.uint64)
     )
+
+
+@pytest.mark.parametrize("null_size", [-1, -100, 2.5])
+def test_pvalues_reject_invalid_null_size(null_size):
+    """Negative or fractional null sizes raise instead of giving invalid p-values."""
+    with pytest.raises(ValueError, match="null_size"):
+        nulls.ap_pvalues([0.1], [0], CONFS[:1], null_size, seed=0)
+    with pytest.raises(ValueError, match="null_size"):
+        nulls.map_pvalues([0.1], [0, 1], [0], [1], CONFS[:1], null_size, seed=0)

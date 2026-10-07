@@ -32,6 +32,12 @@ def resolve_seed(seed: int | None) -> int:
     return seed
 
 
+def _check_null_size(null_size: int) -> int:
+    if int(null_size) != null_size or null_size < 0:
+        raise ValueError(f"null_size must be a non-negative integer, got {null_size}")
+    return int(null_size)
+
+
 def _chunk_size(null_size: int, rows: int, budget_bytes: int) -> int:
     """Return the samples per chunk that fit ``rows`` float64 nulls in the budget."""
     return max(1, min(null_size, budget_bytes // (8 * max(rows, 1))))
@@ -154,6 +160,7 @@ def ap_pvalues(
         raise ValueError(f"{len(scores)} scores but {len(conf_ix)} conf_ix")
     if len(conf_ix) and (conf_ix.min() < 0 or conf_ix.max() >= len(confs)):
         raise ValueError(f"conf_ix must index the {len(confs)} rows of confs")
+    null_size = _check_null_size(null_size)
     seed = resolve_seed(seed)
     backend = resolve_backend(backend)
     plan = null_plan(confs, seed)
@@ -250,6 +257,7 @@ def map_pvalues(
     conf_ix = np.asarray(conf_ix, dtype=np.int64)
     conf_cnt = np.asarray(conf_cnt, dtype=np.int64)
     confs = np.asarray(confs)
+    null_size = _check_null_size(null_size)
     seed = resolve_seed(seed)
     backend = resolve_backend(backend)
     plan = null_plan(confs, seed)
