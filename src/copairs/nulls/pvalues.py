@@ -12,7 +12,7 @@ observed one is counted as a tie, as in the paper's ``>=`` definition.
 import numba
 import numpy as np
 
-from copairs.nulls.sampler import _ap_nulls, resolve_backend
+from copairs.nulls.sampler import _ap_nulls, null_plan, resolve_backend
 
 # Far above float64 summation-order differences of an AP (~k * 2**-52). Distinct
 # AP values can lie closer than this in larger configurations (e.g. 9e-13 apart
@@ -107,6 +107,11 @@ def ap_pvalues(
         raise ValueError(f"conf_ix must index the {len(confs)} rows of confs")
     seed = resolve_seed(seed)
     backend = resolve_backend(backend)
+    plan = null_plan(confs, seed)
+    if backend == "cuda":  # upload the configurations once
+        import cupy as cp
+
+        plan = tuple(cp.asarray(a) for a in plan)
     order = np.lexsort((scores, conf_ix))
     thr = scores[order] - TIE_TOL
     ptr = np.searchsorted(conf_ix[order], np.arange(len(confs) + 1))
@@ -128,7 +133,8 @@ def ap_pvalues(
     thr_x, counts = xp.asarray(thr), xp.zeros(len(scores), dtype=np.int64)
     for b, start, size in _progress(work, progress_bar, "AP null"):
         sl = slice(b, min(b + batch, len(confs)))
-        null = _ap_nulls(confs[sl], size, seed, start, backend, np.float64)
+        part = tuple(a[sl] for a in plan)
+        null = _ap_nulls(part, size, start, backend, np.float64)
         count(null, thr_x, ptr[sl.start : sl.stop + 1], counts)
     counts = counts.get() if backend == "cuda" else counts
     pvals = np.empty(len(scores), dtype=np.float64)
@@ -195,6 +201,11 @@ def map_pvalues(
     confs = np.asarray(confs)
     seed = resolve_seed(seed)
     backend = resolve_backend(backend)
+    plan = null_plan(confs, seed)
+    if backend == "cuda":  # upload the configurations once
+        import cupy as cp
+
+        plan = tuple(cp.asarray(a) for a in plan)
     if (
         len(ptr) < 1
         or ptr[0] != 0
@@ -225,7 +236,7 @@ def map_pvalues(
     for start, size in _progress(
         _chunks(null_size, len(confs), budget_bytes), progress_bar, "mAP null"
     ):
-        group(_ap_nulls(confs, size, seed, start, backend, np.float64))
+        group(_ap_nulls(plan, size, start, backend, np.float64))
     if backend == "cuda":
         counts = group.counts()
     return (counts + 1) / (null_size + 1)

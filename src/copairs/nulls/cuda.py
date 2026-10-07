@@ -244,8 +244,8 @@ def ap_nulls(num_pos, total, k0, k1, start: int, size: int, dtype=np.float32):
     args = (
         cp.asarray(num_pos, dtype=cp.int64),
         cp.asarray(total, dtype=cp.int64),
-        cp.asarray(np.asarray(k0, dtype=np.uint32)),
-        cp.asarray(np.asarray(k1, dtype=np.uint32)),
+        cp.asarray(k0, dtype=cp.uint32),
+        cp.asarray(k1, dtype=cp.uint32),
         np.int64(start),
         np.int64(size),
         np.int64(n_conf),

@@ -258,10 +258,19 @@ def _validate_confs(confs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def config_keys(confs: np.ndarray, seed: int) -> tuple[np.ndarray, np.ndarray]:
     """Philox keys ``(k0, k1)`` of each ``(num_pos, total)`` row of ``confs``."""
+    plan = null_plan(confs, seed)
+    return plan[2], plan[3]
+
+
+def null_plan(confs: np.ndarray, seed: int) -> tuple[np.ndarray, ...]:
+    """Return validated ``(num_pos, total, k0, k1)`` arrays of ``confs`` for ``seed``.
+
+    Callers sampling the same configurations chunk by chunk derive this once.
+    """
     num_pos, total = _validate_confs(confs)
     keys = [config_key(seed, int(p), int(t)) for p, t in zip(num_pos, total)]
     keys = np.array(keys, dtype=np.uint64).reshape(-1, 2)
-    return keys[:, 0].copy(), keys[:, 1].copy()
+    return num_pos, total, keys[:, 0].copy(), keys[:, 1].copy()
 
 
 def ap_nulls(
@@ -296,17 +305,17 @@ def ap_nulls(
     np.ndarray
         ``(n, null_size)`` AP samples.
     """
-    out = _ap_nulls(confs, null_size, seed, start, resolve_backend(backend), dtype)
+    plan = null_plan(confs, seed)
+    out = _ap_nulls(plan, null_size, start, resolve_backend(backend), dtype)
     return out.get() if hasattr(out, "get") else out
 
 
-def _ap_nulls(confs, null_size, seed, start, backend, dtype):
-    """:func:`ap_nulls` for a resolved backend; CUDA results stay on the device."""
+def _ap_nulls(plan, null_size, start, backend, dtype):
+    """:func:`ap_nulls` from a :func:`null_plan`; CUDA results stay on the device."""
     dtype = np.dtype(dtype)
     if dtype not in (np.float32, np.float64):
         raise ValueError(f"dtype must be float32 or float64, got {dtype}")
-    num_pos, total = _validate_confs(confs)
-    k0, k1 = config_keys(confs, seed)
+    num_pos, total, k0, k1 = plan
     if backend == "cuda":
         from copairs.nulls import cuda
 
