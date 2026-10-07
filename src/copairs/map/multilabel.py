@@ -135,7 +135,9 @@ def average_precision(
         pair_keys = neg_pairs[:, 0].astype(np.int64) * len(meta) + neg_pairs[:, 1]
         if not (np.diff(pair_keys) > 0).all():
             pair_keys = np.unique(pair_keys)
-            neg_pairs = np.stack([pair_keys // len(meta), pair_keys % len(meta)], axis=1)
+            neg_pairs = np.stack(
+                [pair_keys // len(meta), pair_keys % len(meta)], axis=1
+            )
             neg_pairs = neg_pairs.astype(np.uint32)
     else:
         neg_pairs = np.unique(neg_pairs, axis=0)
