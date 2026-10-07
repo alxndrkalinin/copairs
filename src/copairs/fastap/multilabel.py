@@ -76,9 +76,10 @@ def _in_sorted(keys, sorted_keys):
 def multilabel_pairs(dframe, sameby, diffby, multilabel_col):
     """Fast :func:`copairs.matching.find_pairs_multilabel`, or None if unsupported.
 
-    ``sameby`` and ``diffby`` exclude ``multilabel_col``. Returns the same pair
-    set as the SQL implementation, with pairs sorted by label (sameby) or by
-    ``(i, j)`` (diffby).
+    ``sameby`` excludes ``multilabel_col``; ``diffby`` may hold it, so that
+    paired rows' label lists differ. Returns the same pair set as the SQL
+    implementation, with pairs sorted by label (sameby) or by ``(i, j)``
+    (diffby).
     """
     if not dframe.index.equals(pd.RangeIndex(len(dframe))):
         return None

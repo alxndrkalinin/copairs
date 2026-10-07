@@ -42,7 +42,12 @@ def as_set(pairs):
 
 @pytest.mark.parametrize(
     "sameby,diffby",
-    [(["labels"], []), (["labels", "plate"], []), (["labels"], ["well"])],
+    [
+        (["labels"], []),
+        (["labels", "plate"], []),
+        (["labels"], ["well"]),
+        (["labels"], ["labels"]),  # share a label, but not the whole list
+    ],
 )
 def test_shared_label_pairs_match_sql(sameby, diffby):
     """Pairs sharing a label, and per-label counts, equal the SQL result."""
