@@ -56,6 +56,52 @@ def _count_ge_host(null, thr, ptr, counts):
         counts[lo:hi] += np.cumsum(hist[::-1])[::-1][1:]
 
 
+@numba.njit(inline="always")
+def _upper_bound(vals, lo, hi, key):
+    """``lo`` plus #{vals[lo:hi] <= key} for sorted ``vals`` (NaN sorts last)."""
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        v = vals[mid]
+        if not np.isnan(v) and v <= key:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def _count_ge_numba(null, thr, ptr, counts):
+    """:func:`_count_ge_host` in parallel over configurations and sample blocks."""
+    _count_ge_kernel(
+        np.ascontiguousarray(null), thr, ptr, counts, numba.get_num_threads()
+    )
+
+
+@numba.njit(parallel=True, cache=True)
+def _count_ge_kernel(null, thr, ptr, counts, n_threads):
+    n_conf, size = null.shape
+    n_blocks = max(1, min((size + (1 << 16) - 1) >> 16, 4 * n_threads))
+    block = (size + n_blocks - 1) // n_blocks
+    base = ptr[0]
+    partial = np.zeros((n_blocks, ptr[n_conf] - base + n_conf), dtype=np.int64)
+    for task in numba.prange(n_conf * n_blocks):
+        c = task // n_blocks
+        b = task - c * n_blocks
+        lo, hi = ptr[c], ptr[c + 1]
+        if hi == lo:
+            continue
+        off = lo - base + c - lo
+        for t in range(b * block, min(size, (b + 1) * block)):
+            partial[b, off + _upper_bound(thr, lo, hi, null[c, t])] += 1
+    for c in numba.prange(n_conf):
+        lo, hi = ptr[c], ptr[c + 1]
+        off = lo - base + c
+        run = 0
+        for q in range(hi - lo - 1, -1, -1):
+            for b in range(n_blocks):
+                run += partial[b, off + q + 1]
+            counts[lo + q] += run
+
+
 def _count_ge_device(null, thr, ptr, counts):
     import cupy as cp
 
@@ -128,6 +174,8 @@ def ap_pvalues(
         import cupy as cp
 
         xp, count = cp, _count_ge_device
+    elif backend == "numba":
+        xp, count = np, _count_ge_numba
     else:
         xp, count = np, _count_ge_host
     thr_x, counts = xp.asarray(thr), xp.zeros(len(scores), dtype=np.int64)
