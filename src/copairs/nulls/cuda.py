@@ -10,12 +10,24 @@ import functools
 
 import numpy as np
 
+from copairs.nulls import sampler
+
 try:
     import cupy as cp
 except ImportError:  # pragma: no cover - exercised only without cupy
     cp = None
 
-_PHILOX = r"""
+# Constants shared with the CPU sampler, so both pick the same gap search.
+_DEFINES = (
+    f"#define GUIDED_RATIO {sampler.GUIDED_RATIO}LL\n"
+    f"#define LOG_MARGIN {sampler._LOG_MARGIN!r}\n"
+    f"#define EPS {sampler._EPS!r}\n"
+    f"#define FACTOR_LIMIT {sampler._FACTOR_LIMIT!r}\n"
+)
+
+_PHILOX = (
+    _DEFINES
+    + r"""
 __device__ __forceinline__ void philox4x32(unsigned int c[4], unsigned int k0, unsigned int k1) {
     #pragma unroll
     for (int r = 0; r < 10; ++r) {
@@ -30,6 +42,61 @@ __device__ __forceinline__ void philox4x32(unsigned int c[4], unsigned int k0, u
 __device__ __forceinline__ double uniform53(unsigned int a, unsigned int b) {
     unsigned long long x = ((unsigned long long)(a >> 5) << 26) | (b >> 6);
     return (double)x * (1.0 / 9007199254740992.0);
+}
+
+// Gap searches; mirror copairs.nulls.sampler.gap_loop and gap_guided.
+__device__ long long gap_loop(long long remaining, long long k, double u) {
+    long long top = remaining - k, gap = 0;
+    double quot = (double)top / (double)remaining;
+    while (quot > u) {
+        gap += 1;
+        top -= 1;
+        quot = quot * ((double)top / (double)(remaining - gap));
+    }
+    return gap;
+}
+
+__device__ bool stops(long long remaining, long long k, long long g, double u, double log_u) {
+    if ((double)(g + 1) / (double)(remaining - k + 1) <= FACTOR_LIMIT) {
+        double acc = 0.0;
+        for (long long t = 0; t < k; ++t) acc += log1p(-((double)(g + 1) / (double)(remaining - t)));
+        double margin = LOG_MARGIN + (double)(2 * g + 2) * EPS;
+        if (acc < log_u - margin) return true;
+        if (acc > log_u + margin) return false;
+    }
+    long long top = remaining - k;
+    double quot = (double)top / (double)remaining;
+    for (long long gap = 1; gap <= g; ++gap) {
+        top -= 1;
+        quot = quot * ((double)top / (double)(remaining - gap));
+    }
+    return !(quot > u);
+}
+
+__device__ long long gap_guided(long long remaining, long long k, double u) {
+    long long last = remaining - k;
+    if (u == 0.0) return gap_loop(remaining, k, u);
+    double log_u = log(u);
+    double guess = ((double)remaining - 0.5 * (double)(k - 1)) * (1.0 - exp(log_u / (double)k)) - 1.0;
+    long long g = (long long)guess;
+    g = g < 0 ? 0 : (g > last ? last : g);
+    long long lo, hi, step = 1;
+    if (stops(remaining, k, g, u, log_u)) {
+        hi = g;
+        lo = hi - step;
+        while (lo >= 0 && stops(remaining, k, lo, u, log_u)) { hi = lo; step *= 2; lo = hi - step; }
+        if (lo < -1) lo = -1;
+    } else {
+        lo = g;
+        hi = lo + step;
+        while (hi < last && !stops(remaining, k, hi, u, log_u)) { lo = hi; step *= 2; hi = lo + step; }
+        if (hi > last) hi = last;
+    }
+    while (hi - lo > 1) {
+        long long mid = (lo + hi) / 2;
+        if (stops(remaining, k, mid, u, log_u)) hi = mid; else lo = mid;
+    }
+    return hi;
 }
 
 // Average precision of sample j; mirrors copairs.nulls.sampler._ap_sample.
@@ -55,15 +122,10 @@ __device__ double ap_sample(long long num_pos, long long total, unsigned long lo
         if (k == 1) {
             gap = (long long)floor((double)remaining * u);
             if (gap > remaining - 1) gap = remaining - 1;
+        } else if (remaining - k > GUIDED_RATIO * k * (k + 1)) {
+            gap = gap_guided(remaining, k, u);
         } else {
-            long long top = remaining - k;
-            double quot = (double)top / (double)remaining;
-            gap = 0;
-            while (quot > u) {
-                gap += 1;
-                top -= 1;
-                quot = quot * ((double)top / (double)(remaining - gap));
-            }
+            gap = gap_loop(remaining, k, u);
         }
         rank += gap + 1;
         i += 1;
@@ -74,6 +136,7 @@ __device__ double ap_sample(long long num_pos, long long total, unsigned long lo
     return acc / (double)num_pos;
 }
 """
+)
 
 _AP_NULLS = (
     _PHILOX

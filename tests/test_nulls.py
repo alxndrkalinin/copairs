@@ -206,3 +206,19 @@ def test_backend_selection():
     assert nulls.resolve_backend("auto") == BACKENDS[0]
     with pytest.raises(ValueError):
         nulls.resolve_backend("tpu")
+
+
+@pytest.mark.parametrize("backend", [b for b in BACKENDS if b != "numpy"])
+@pytest.mark.parametrize(
+    "num_pos,total", [(2, 5000), (3, 3000), (8, 20000), (4, 70000)]
+)
+def test_guided_gap_search_matches_loop(backend, num_pos, total):
+    """The guided gap search reproduces Algorithm A's gaps bit for bit."""
+    assert total - num_pos > sampler.GUIDED_RATIO * num_pos * (num_pos + 1)
+    ref = nulls.ap_nulls([[num_pos, total]], 400, seed=8, backend="numpy")
+    got = nulls.ap_nulls([[num_pos, total]], 400, seed=8, backend=backend)
+    np.testing.assert_array_equal(got.view(np.uint32), ref.view(np.uint32))
+    rng = np.random.default_rng(num_pos)
+    for u in np.concatenate([rng.random(200), [1e-300, 0.5, 1 - 2**-53]]):
+        k = int(rng.integers(2, num_pos + 1))
+        assert sampler._gap_guided(total, k, u) == sampler.gap_loop(total, k, u)

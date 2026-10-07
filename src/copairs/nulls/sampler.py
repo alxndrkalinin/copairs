@@ -26,8 +26,89 @@ except ImportError:  # pragma: no cover - exercised only without numba
     numba = None
 
 
-def _make_ap_sample(philox, uniform):
-    """Build the scalar sampler around ``philox`` and ``uniform`` (Python or Numba)."""
+# Use the guided gap search when the expected gap exceeds this many times the
+# number of remaining positives (its cost per probe); results are identical.
+GUIDED_RATIO = 32
+# Bound on |log P(G > g) evaluated with log1p - log of Algorithm A's product|,
+# excluding the product's own rounding, when every factor is <= 1 - 2**-10.
+_LOG_MARGIN = 1e-9
+_EPS = 2.0**-52
+_FACTOR_LIMIT = 1.0 - 2.0**-10
+
+
+def gap_loop(remaining, k, u):
+    """Algorithm A: smallest gap g whose product P(G > g) is <= u (defines the stream)."""
+    top = remaining - k
+    quot = top / remaining
+    gap = 0
+    while quot > u:
+        gap += 1
+        top -= 1
+        quot = quot * (top / (remaining - gap))
+    return gap
+
+
+def _make_gap_guided(gap_loop, jit=lambda f: f):
+    """Build the guided search; ``jit`` compiles its helper (Numba) or not (Python)."""
+
+    @jit
+    def stops(remaining, k, g, u, log_u):
+        """Whether Algorithm A's product for gap ``g`` is <= ``u``."""
+        # The factor with t = k - 1 is the largest; near 1 the log is ill-conditioned.
+        if (g + 1) / (remaining - k + 1) <= _FACTOR_LIMIT:
+            acc = 0.0
+            for t in range(k):
+                acc += math.log1p(-((g + 1) / (remaining - t)))
+            margin = _LOG_MARGIN + (2 * g + 2) * _EPS
+            if acc < log_u - margin:
+                return True
+            if acc > log_u + margin:
+                return False
+        # Too close to call: replay the product exactly.
+        top = remaining - k
+        quot = top / remaining
+        for gap in range(1, g + 1):
+            top -= 1
+            quot = quot * (top / (remaining - gap))
+        return not quot > u
+
+    def gap_guided(remaining, k, u):
+        """:func:`gap_loop` by exponential and binary search over the closed form."""
+        last = remaining - k  # the product is exactly 0 there
+        if u == 0.0:
+            return gap_loop(remaining, k, u)
+        log_u = math.log(u)
+        guess = (remaining - 0.5 * (k - 1)) * (1.0 - math.exp(log_u / k)) - 1.0
+        g = min(max(int(guess), 0), last)
+        if stops(remaining, k, g, u, log_u):
+            hi, step = g, 1
+            lo = hi - step
+            while lo >= 0 and stops(remaining, k, lo, u, log_u):
+                hi = lo
+                step *= 2
+                lo = hi - step
+            lo = max(lo, -1)
+        else:
+            lo, step = g, 1
+            hi = lo + step
+            while hi < last and not stops(remaining, k, hi, u, log_u):
+                lo = hi
+                step *= 2
+                hi = lo + step
+            hi = min(hi, last)
+        while hi - lo > 1:  # stops(lo) is false (or lo == -1), stops(hi) is true
+            mid = (lo + hi) // 2
+            if stops(remaining, k, mid, u, log_u):
+                hi = mid
+            else:
+                lo = mid
+        return hi
+
+    return gap_guided
+
+
+def _make_ap_sample(philox, uniform, gap_loop, gap_guided):
+    """Build the scalar sampler around ``philox``, ``uniform`` and the gap searches."""
 
     def ap_sample(num_pos, total, j, k0, k1):
         """Average precision of sample ``j`` of configuration ``(num_pos, total)``."""
@@ -58,15 +139,10 @@ def _make_ap_sample(philox, uniform):
                 gap = int(math.floor(remaining * u))
                 if gap > remaining - 1:
                     gap = remaining - 1
+            elif remaining - k > GUIDED_RATIO * k * (k + 1):
+                gap = gap_guided(remaining, k, u)
             else:
-                # Smallest gap g with P(G > g) <= u; P(G > g) = prod (top - j) / (remaining - j).
-                top = remaining - k
-                quot = top / remaining
-                gap = 0
-                while quot > u:
-                    gap += 1
-                    top -= 1
-                    quot = quot * (top / (remaining - gap))
+                gap = gap_loop(remaining, k, u)
             rank += gap + 1
             i += 1
             acc += i / rank
@@ -77,7 +153,8 @@ def _make_ap_sample(philox, uniform):
     return ap_sample
 
 
-_ap_sample = _make_ap_sample(philox4x32, uniform53)
+_gap_guided = _make_gap_guided(gap_loop)
+_ap_sample = _make_ap_sample(philox4x32, uniform53, gap_loop, _gap_guided)
 
 
 def _ap_null_numpy(num_pos, total, start, size, k0, k1):
@@ -122,10 +199,13 @@ def _ap_null_numpy(num_pos, total, start, size, k0, k1):
 
 
 if numba is not None:
+    _gap_loop_nb = numba.njit(cache=True)(gap_loop)
     _ap_sample_nb = numba.njit(cache=True)(
         _make_ap_sample(
             numba.njit(inline="always")(philox4x32),
             numba.njit(inline="always")(uniform53),
+            _gap_loop_nb,
+            numba.njit(cache=True)(_make_gap_guided(_gap_loop_nb, numba.njit)),
         )
     )
 
