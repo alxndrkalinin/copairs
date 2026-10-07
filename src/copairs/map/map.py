@@ -125,13 +125,8 @@ def get_map_pvalue(
 
     logger.info("Computing null_dist...")
     # Generate null distributions for each unique configuration
-    null_dists = compute.get_null_dists(
-        null_confs,
-        null_size,
-        seed=seed,
-        cache_dir=cache_dir,
-        progress_bar=progress_bar,
-        method="legacy",
+    null_dists = compute._get_null_dists_legacy(
+        null_confs, null_size, seed, cache_dir, progress_bar
     )
 
     # Function to calculate the p-value for a mAP score based on the null distribution
