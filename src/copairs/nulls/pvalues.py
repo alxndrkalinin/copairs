@@ -13,8 +13,10 @@ import numpy as np
 
 from copairs.nulls.sampler import numba, _ap_nulls, resolve_backend
 
-# Far above float64 summation-order differences of an AP (~k * 2**-52) and far
-# below the spacing between distinct AP values of small configurations.
+# Far above float64 summation-order differences of an AP (~k * 2**-52). Distinct
+# AP values can lie closer than this in larger configurations (e.g. 9e-13 apart
+# for 2 positives among 5000), so a null value just below a score may count as
+# a tie; each such value has null probability ~1/C(total, num_pos).
 TIE_TOL = 1e-10
 DEFAULT_BUDGET = 2**30
 
