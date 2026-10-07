@@ -49,7 +49,7 @@ def test_philox_known_answers(ctr, key, expected):
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_backends_bitwise_identical(backend):
     """Every backend returns the scalar reference's float32 values bit for bit."""
-    k0, k1 = sampler.config_keys(CONFS, 3)
+    _, _, k0, k1 = sampler.null_plan(CONFS, 3)
     ref = np.array(
         [
             [

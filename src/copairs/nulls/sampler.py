@@ -258,12 +258,6 @@ def _validate_confs(confs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return num_pos, total
 
 
-def config_keys(confs: np.ndarray, seed: int) -> tuple[np.ndarray, np.ndarray]:
-    """Philox keys ``(k0, k1)`` of each ``(num_pos, total)`` row of ``confs``."""
-    plan = null_plan(confs, seed)
-    return plan[2], plan[3]
-
-
 def null_plan(confs: np.ndarray, seed: int) -> tuple[np.ndarray, ...]:
     """Return validated ``(num_pos, total, k0, k1)`` arrays of ``confs`` for ``seed``.
 
