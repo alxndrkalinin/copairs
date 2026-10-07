@@ -86,6 +86,13 @@ ones to float32 rounding, so near-tied pairs can rank differently. The kernels
 compute in float64, so float32 profiles whose norms overflow float32 (entries
 around 1e19 and up) get their actual similarity instead of the generic 0 or NaN.
 
+Multiprocessing: a process forked after copairs ran on the GPU picks a CPU
+backend, since CUDA cannot be used after `fork`. If Numba uses its GNU OpenMP
+threading layer (the default when TBB is not installed), it terminates a forked
+child that runs a parallel kernel once the parent has run one. Use the `spawn`
+or `forkserver` start method, or set `NUMBA_THREADING_LAYER=workqueue` (or
+install `tbb`) before the first copairs call.
+
 ## Citation
 If you find this work useful for your research, please cite our [paper](https://doi.org/10.1038/s41467-025-60306-2):
 
