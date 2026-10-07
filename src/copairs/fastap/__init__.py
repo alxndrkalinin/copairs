@@ -31,25 +31,31 @@ def setup(
     backend: str,
     feats,
     distance,
+    batch_size: int,
     progress_bar: bool,
     on_device: bool = False,
 ):
-    """Resolve the AP stage's method and backend and pick its similarity function.
+    """Resolve the AP stage's method and backend and bind its similarity function.
 
     The fast AP stage runs on ``"cuda"`` or ``"numba"``; for the NumPy
-    implementation use ``method="legacy"``. The returned function has ``compute.get_similarity_fn``'s ``(feats, pairs, batch_size)``
-    signature and uses a kernel when ``distance`` has one; with ``on_device``,
-    a CUDA kernel's similarities stay on the GPU for :func:`ap_from_pairs`.
+    implementation use ``method="legacy"``. The returned function maps pairs
+    to the similarities of their ``feats`` rows, through a kernel when
+    ``distance`` has one; with ``on_device``, a CUDA kernel's similarities stay
+    on the GPU for :func:`ap_from_pairs`.
 
     Returns
     -------
     tuple
-        ``(method, backend, similarity_fn)``.
+        ``(method, backend, similarity)``.
     """
     check_method(method)
-    similarity_fn = compute.get_similarity_fn(distance, progress_bar=progress_bar)
+    generic = compute.get_similarity_fn(distance, progress_bar=progress_bar)
+
+    def similarity(pairs):
+        return generic(feats, pairs, batch_size)
+
     if method == "legacy":
-        return method, backend, similarity_fn
+        return method, backend, similarity
     backend = resolve_backend(backend)
     if backend == "numpy":
         raise ValueError(
@@ -60,10 +66,10 @@ def setup(
     if kernel is not None:
         keep = {"as_numpy": False} if on_device and backend == "cuda" else {}
 
-        def similarity_fn(feats, pairs, batch_size):
+        def similarity(pairs):
             return kernel(pairs, **keep)
 
-    return method, backend, similarity_fn
+    return method, backend, similarity
 
 
 def pair_similarity(feats: np.ndarray, distance, backend: str):

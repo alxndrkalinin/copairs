@@ -98,8 +98,8 @@ def average_precision(
     columns = flatten_str_list(pos_sameby, pos_diffby, neg_sameby, neg_diffby)
     meta, columns = evaluate_and_filter(meta, columns)
     validate_pipeline_input(meta, feats, columns)
-    method, backend, distance_fn = fastap.setup(
-        method, backend, feats, distance, progress_bar
+    method, backend, similarity = fastap.setup(
+        method, backend, feats, distance, batch_size, progress_bar
     )
     # Critical!, otherwise the indexing wont work
     meta = meta.reset_index(drop=True).copy()
@@ -129,10 +129,10 @@ def average_precision(
         raise UnpairedException("Unable to find any negative pairs.")
 
     logger.info("Computing positive similarities...")
-    pos_sims = distance_fn(feats, pos_pairs, batch_size)
+    pos_sims = similarity(pos_pairs)
 
     logger.info("Computing negative similarities...")
-    neg_sims = distance_fn(feats, neg_pairs, batch_size)
+    neg_sims = similarity(neg_pairs)
 
     if method == "fast":
         logger.info("Computing AP per label...")

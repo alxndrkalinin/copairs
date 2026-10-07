@@ -191,8 +191,8 @@ def average_precision(
     validate_pipeline_input(meta, feats, columns)
 
     # Get the distance function for similarity calculations (e.g., cosine)
-    method, backend, similarity_fn = fastap.setup(
-        method, backend, feats, distance, progress_bar, on_device=True
+    method, backend, similarity = fastap.setup(
+        method, backend, feats, distance, batch_size, progress_bar, on_device=True
     )
 
     # Reset metadata index for consistent indexing
@@ -214,11 +214,11 @@ def average_precision(
 
     # Compute similarities for positive pairs
     logger.info("Computing positive similarities...")
-    pos_sims = similarity_fn(feats, pos_pairs, batch_size)
+    pos_sims = similarity(pos_pairs)
 
     # Compute similarities for negative pairs
     logger.info("Computing negative similarities...")
-    neg_sims = similarity_fn(feats, neg_pairs, batch_size)
+    neg_sims = similarity(neg_pairs)
 
     if method == "fast":
         logger.info("Computing average precision...")
