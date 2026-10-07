@@ -98,6 +98,9 @@ def get_map_pvalue(
     if method == "fast":
         from copairs import nulls
 
+        if len(map_scores) == 0:
+            map_scores["p_value"] = np.array([], dtype=np.float64)
+            return map_scores
         logger.info("Computing p-values...")
         # (group, configuration) member counts in CSR layout.
         sizes = map_scores["indices"].map(len).to_numpy()

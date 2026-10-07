@@ -98,3 +98,19 @@ def test_unknown_method():
     """Unknown null methods raise."""
     with pytest.raises(ValueError):
         compute.get_null_dists(CONFS, 10, 0, method="exact")
+
+
+def test_map_fast_empty_input():
+    """No valid AP scores give an empty result with the usual columns."""
+    empty = pd.DataFrame(
+        {
+            "g": pd.Series([], dtype=str),
+            "average_precision": pd.Series([], dtype=float),
+            "normalized_average_precision": pd.Series([], dtype=float),
+            "n_pos_pairs": pd.Series([], dtype=int),
+            "n_total_pairs": pd.Series([], dtype=int),
+        }
+    )
+    result = mean_average_precision(empty, ["g"], 100, 0.05, 0, progress_bar=False)
+    assert len(result) == 0
+    assert {"p_value", "corrected_p_value", "below_corrected_p"} <= set(result.columns)
