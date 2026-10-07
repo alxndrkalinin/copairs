@@ -98,6 +98,10 @@ def ap_pvalues(
     scores = np.asarray(scores, dtype=np.float64)
     conf_ix = np.asarray(conf_ix, dtype=np.int64)
     confs = np.asarray(confs)
+    if len(conf_ix) != len(scores):
+        raise ValueError(f"{len(scores)} scores but {len(conf_ix)} conf_ix")
+    if len(conf_ix) and (conf_ix.min() < 0 or conf_ix.max() >= len(confs)):
+        raise ValueError(f"conf_ix must index the {len(confs)} rows of confs")
     seed = resolve_seed(seed)
     backend = resolve_backend(backend)
     order = np.lexsort((scores, conf_ix))

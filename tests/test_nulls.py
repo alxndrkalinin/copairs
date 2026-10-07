@@ -222,3 +222,11 @@ def test_guided_gap_search_matches_loop(backend, num_pos, total):
     for u in np.concatenate([rng.random(200), [1e-300, 0.5, 1 - 2**-53]]):
         k = int(rng.integers(2, num_pos + 1))
         assert sampler._gap_guided(total, k, u) == sampler.gap_loop(total, k, u)
+
+
+def test_ap_pvalues_validates_conf_ix():
+    """Scores pointing outside confs raise instead of being dropped."""
+    with pytest.raises(ValueError):
+        nulls.ap_pvalues([0.0], [5], CONFS[:2], 10, seed=1)
+    with pytest.raises(ValueError):
+        nulls.ap_pvalues([0.0, 0.5], [0], CONFS[:2], 10, seed=1)
