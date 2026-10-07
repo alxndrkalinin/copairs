@@ -43,17 +43,17 @@ def _chunk_size(null_size: int, rows: int, budget_bytes: int) -> int:
     return max(1, min(null_size, budget_bytes // (8 * max(rows, 1))))
 
 
-def _chunks(null_size: int, rows: int, budget_bytes: int) -> list[tuple[int, int]]:
-    size = _chunk_size(null_size, rows, budget_bytes)
-    return [(s, min(size, null_size - s)) for s in range(0, null_size, size)]
+def _chunks(null_size: int, size: int):
+    """``(start, size)`` sample chunks, generated lazily."""
+    return ((s, min(size, null_size - s)) for s in range(0, null_size, size))
 
 
-def _progress(items, enabled: bool, desc: str):
-    if not enabled or len(items) < 2:
+def _progress(items, total: int, enabled: bool, desc: str):
+    if not enabled or total < 2:
         return items
     from tqdm.autonotebook import tqdm
 
-    return tqdm(items, desc=desc, leave=False)
+    return tqdm(items, total=total, desc=desc, leave=False)
 
 
 def _count_ge_host(null, thr, ptr, counts):
@@ -172,14 +172,13 @@ def ap_pvalues(
     thr = scores[order] - TIE_TOL
     ptr = np.searchsorted(conf_ix[order], np.arange(len(confs) + 1))
     # Process configurations in batches whose chunk of samples fits the budget.
-    sample_chunks = _chunks(null_size, 1, budget_bytes)
     chunk = _chunk_size(null_size, 1, budget_bytes)
     batch = max(1, budget_bytes // (8 * chunk))
-    work = [
-        (b, start, size)
-        for b in range(0, len(confs), batch)
-        for start, size in sample_chunks
-    ]
+    batches = range(0, len(confs), batch)
+    work = (
+        (b, start, size) for b in batches for start, size in _chunks(null_size, chunk)
+    )
+    n_work = len(batches) * -(-null_size // chunk)
     if backend == "cuda":
         import cupy as cp
 
@@ -189,7 +188,7 @@ def ap_pvalues(
     else:
         xp, count = np, _count_ge_host
     thr_x, counts = xp.asarray(thr), xp.zeros(len(scores), dtype=np.int64)
-    for b, start, size in _progress(work, progress_bar, "AP null"):
+    for b, start, size in _progress(work, n_work, progress_bar, "AP null"):
         sl = slice(b, min(b + batch, len(confs)))
         part = tuple(a[sl] for a in plan)
         null = _ap_nulls(part, size, start, backend, np.float64)
@@ -294,8 +293,10 @@ def map_pvalues(
         def group(null):
             _group_ge_host(null, ptr, conf_ix, conf_cnt, n_group, thr, counts)
 
+    chunk = _chunk_size(null_size, len(confs), budget_bytes)
+    n_work = -(-null_size // chunk)
     for start, size in _progress(
-        _chunks(null_size, len(confs), budget_bytes), progress_bar, "mAP null"
+        _chunks(null_size, chunk), n_work, progress_bar, "mAP null"
     ):
         group(_ap_nulls(plan, size, start, backend, np.float64))
     if backend == "cuda":

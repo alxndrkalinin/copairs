@@ -275,3 +275,14 @@ def test_pvalues_reject_invalid_null_size(null_size):
         nulls.ap_pvalues([0.1], [0], CONFS[:1], null_size, seed=0)
     with pytest.raises(ValueError, match="null_size"):
         nulls.map_pvalues([0.1], [0, 1], [0], [1], CONFS[:1], null_size, seed=0)
+
+
+def test_pvalues_tiny_budget_streams_lazily():
+    """A budget of one sample per chunk streams without building chunk lists."""
+    scores, conf_ix = np.array([0.2, 0.5]), np.array([0, 1])
+    got = nulls.ap_pvalues(scores, conf_ix, CONFS[3:5], 300, seed=2, budget_bytes=8)
+    np.testing.assert_array_equal(
+        got, brute_ap_pvalues(scores, conf_ix, CONFS[3:5], 300, 2)
+    )
+    chunks = pvalues._chunks(10**12, 1)
+    assert next(chunks) == (0, 1)  # a generator: no 1e12-element list
