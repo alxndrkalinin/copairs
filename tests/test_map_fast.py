@@ -51,6 +51,30 @@ def test_map_pvalue_counts_ties(tmp_path):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_float32_scores_count_ties(backend):
+    """float32-rounded scores still tie with the null atoms they round from.
+
+    With one positive among 3, AP is 1, 1/2 or 1/3, so every null value is
+    ``>= 1/3`` and the p-value of an AP or mAP of 1/3 is exactly 1.
+    """
+    kwargs = dict(null_size=1000, seed=0, progress_bar=False, backend=backend)
+    for dtype in (np.float64, np.float32):
+        p = compute.p_values(np.array([1 / 3], dtype=dtype), [[1, 3]], **kwargs)
+        assert p[0] == 1.0
+    scores = pd.DataFrame(
+        {
+            "g": ["a", "a"],
+            "average_precision": np.float32([1 / 3, 1 / 3]),
+            "normalized_average_precision": 0.0,
+            "n_pos_pairs": 1,
+            "n_total_pairs": 3,
+        }
+    )
+    fast = mean_average_precision(scores, ["g"], threshold=0.05, **kwargs)
+    assert fast["p_value"].iloc[0] == 1.0
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_map_fast_vs_legacy(backend, tmp_path):
     """Fast and legacy mAP p-values agree within Monte Carlo error away from ties."""
     rng = np.random.default_rng(3)

@@ -640,8 +640,9 @@ def p_values(
     method : str
         ``"fast"`` (default) streams exact null samples (see
         :func:`get_null_dists`) and counts null scores ``>= score``, treating
-        values within :data:`copairs.nulls.TIE_TOL` as ties. ``"legacy"``
-        reproduces copairs <= 0.5.5.
+        values within the scores' rounding as ties (see
+        :func:`copairs.nulls.tie_thresholds`). ``"legacy"`` reproduces copairs
+        <= 0.5.5.
     backend : str
         Backend of the fast method, see :func:`get_null_dists`.
 

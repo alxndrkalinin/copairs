@@ -4,9 +4,9 @@ Nulls are regenerated chunk by chunk instead of being stored, so memory is
 bounded by ``budget_bytes`` whatever ``null_size`` and the number of
 configurations. Null samples are kept in float64, the precision copairs
 computes observed APs in, and a null value counts against an observed score
-when ``null >= score - TIE_TOL``. The tolerance absorbs summation-order
-rounding between the two computations, so a null rank list identical to the
-observed one is counted as a tie, as in the paper's ``>=`` definition.
+when ``null >= score - tol`` (see :func:`tie_thresholds`). The tolerance
+absorbs rounding between the two computations, so a null rank list identical
+to the observed one is counted as a tie, as in the paper's ``>=`` definition.
 """
 
 import numba
@@ -19,7 +19,26 @@ from copairs.nulls.sampler import _ap_nulls, null_plan, resolve_backend
 # for 2 positives among 5000), so a null value just below a score may count as
 # a tie; each such value has null probability ~1/C(total, num_pos).
 TIE_TOL = 1e-10
+# Rounding, in units of eps * |score|, allowed for scores below float64
+# precision: legacy float32 APs are within 0.48 of the exact value (measured
+# for k up to 20000 positives), and a float32 mean adds at most 0.5.
+TIE_ULPS = 8
 DEFAULT_BUDGET = 2**30
+
+
+def tie_thresholds(scores) -> np.ndarray:
+    """float64 ``scores - tol``; null values at or above a threshold count.
+
+    ``tol`` is :data:`TIE_TOL` for float64 scores. Lower-precision float scores,
+    such as float32 APs from ``method="legacy"`` or a float32 file, carry their
+    own rounding, so ``tol`` also covers ``TIE_ULPS * eps * |score|`` of their
+    dtype.
+    """
+    scores = np.asarray(scores)
+    dtype = scores.dtype if scores.dtype.kind == "f" else np.dtype(np.float64)
+    scores = scores.astype(np.float64)
+    eps = float(np.finfo(dtype).eps)
+    return scores - np.maximum(TIE_TOL, TIE_ULPS * eps * np.abs(scores))
 
 
 def resolve_seed(seed: int | None) -> int:
@@ -135,8 +154,9 @@ def ap_pvalues(
 ) -> np.ndarray:
     """P-value of each AP score against the null of its configuration.
 
-    ``p_i = (1 + #{null >= scores[i] - TIE_TOL}) / (null_size + 1)``, where the
-    null is that of ``confs[conf_ix[i]]``.
+    ``p_i = (1 + #{null >= thr_i}) / (null_size + 1)``, where the null is that
+    of ``confs[conf_ix[i]]`` and ``thr_i`` is ``scores[i]`` minus the tie
+    tolerance of :func:`tie_thresholds`.
 
     Parameters
     ----------
@@ -153,11 +173,11 @@ def ap_pvalues(
     progress_bar : bool
         Show a progress bar over chunks.
     """
-    scores = np.asarray(scores, dtype=np.float64)
+    thr = tie_thresholds(scores)
     conf_ix = np.asarray(conf_ix, dtype=np.int64)
     confs = np.asarray(confs)
-    if len(conf_ix) != len(scores):
-        raise ValueError(f"{len(scores)} scores but {len(conf_ix)} conf_ix")
+    if len(conf_ix) != len(thr):
+        raise ValueError(f"{len(thr)} scores but {len(conf_ix)} conf_ix")
     if len(conf_ix) and (conf_ix.min() < 0 or conf_ix.max() >= len(confs)):
         raise ValueError(f"conf_ix must index the {len(confs)} rows of confs")
     null_size = _check_null_size(null_size)
@@ -168,8 +188,8 @@ def ap_pvalues(
         import cupy as cp
 
         plan = tuple(cp.asarray(a) for a in plan)
-    order = np.lexsort((scores, conf_ix))
-    thr = scores[order] - TIE_TOL
+    order = np.lexsort((thr, conf_ix))
+    thr = thr[order]
     ptr = np.searchsorted(conf_ix[order], np.arange(len(confs) + 1))
     # Process configurations in batches whose chunk of samples fits the budget.
     chunk = _chunk_size(null_size, 1, budget_bytes)
@@ -187,14 +207,14 @@ def ap_pvalues(
         xp, count = np, _count_ge_numba
     else:
         xp, count = np, _count_ge_host
-    thr_x, counts = xp.asarray(thr), xp.zeros(len(scores), dtype=np.int64)
+    thr_x, counts = xp.asarray(thr), xp.zeros(len(thr), dtype=np.int64)
     for b, start, size in _progress(work, n_work, progress_bar, "AP null"):
         sl = slice(b, min(b + batch, len(confs)))
         part = tuple(a[sl] for a in plan)
         null = _ap_nulls(part, size, start, backend, np.float64)
         count(null, thr_x, ptr[sl.start : sl.stop + 1], counts)
     counts = counts.get() if backend == "cuda" else counts
-    pvals = np.empty(len(scores), dtype=np.float64)
+    pvals = np.empty(len(thr), dtype=np.float64)
     pvals[order] = (counts + 1) / (null_size + 1)
     return pvals
 
@@ -249,9 +269,10 @@ def map_pvalues(
     configuration share null samples, as in copairs' original implementation,
     so the group null at sample ``j`` is
     ``sum_e conf_cnt[e] * AP_{conf_ix[e]}(j) / sum_e conf_cnt[e]`` and
-    ``p_g = (1 + #{null_g >= map_scores[g] - TIE_TOL}) / (null_size + 1)``.
+    ``p_g = (1 + #{null_g >= thr_g}) / (null_size + 1)``, with ``thr_g`` from
+    :func:`tie_thresholds`.
     """
-    map_scores = np.asarray(map_scores, dtype=np.float64)
+    thr = tie_thresholds(map_scores)
     ptr = np.asarray(ptr, dtype=np.int64)
     conf_ix = np.asarray(conf_ix, dtype=np.int64)
     conf_cnt = np.asarray(conf_cnt, dtype=np.int64)
@@ -274,21 +295,20 @@ def map_pvalues(
             "ptr must start at 0, end at len(conf_ix) and give every group a member"
         )
     n_group = np.add.reduceat(conf_cnt, ptr[:-1]) if len(conf_cnt) else conf_cnt
-    if len(map_scores) == 0:
+    if len(thr) == 0:
         return np.zeros(0, dtype=np.float64)
-    thr = map_scores - TIE_TOL
     if backend == "cuda":
         from copairs.nulls import cuda
 
         group = cuda.GroupCounter(ptr, conf_ix, conf_cnt, n_group, thr)
     elif backend == "numba":
-        counts = np.zeros(len(map_scores), dtype=np.int64)
+        counts = np.zeros(len(thr), dtype=np.int64)
         args = (ptr, conf_ix, conf_cnt, n_group, thr, counts)
 
         def group(null):
             _group_ge_numba(null, *args)
     else:
-        counts = np.zeros(len(map_scores), dtype=np.int64)
+        counts = np.zeros(len(thr), dtype=np.int64)
 
         def group(null):
             _group_ge_host(null, ptr, conf_ix, conf_cnt, n_group, thr, counts)

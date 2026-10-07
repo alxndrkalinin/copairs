@@ -55,8 +55,8 @@ def get_map_pvalue(
         Location to save the cache (``method="legacy"`` only).
     method : str
         ``"fast"`` (default) streams exact null samples and counts group nulls
-        ``>= mAP``, treating values within :data:`copairs.nulls.TIE_TOL` as ties,
-        in bounded memory. ``"legacy"`` reproduces copairs <= 0.5.5, which counts
+        ``>= mAP``, treating values within the scores' rounding as ties (see
+        :func:`copairs.nulls.tie_thresholds`), in bounded memory. ``"legacy"`` reproduces copairs <= 0.5.5, which counts
         group nulls ``> mAP`` and so gives too small p-values when the observed
         mAP equals an atom of the null (e.g. perfect retrieval).
     backend : str

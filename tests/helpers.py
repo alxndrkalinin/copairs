@@ -83,5 +83,5 @@ def create_dframe(n_options, n_rows):
 def brute_ap_pvalues(scores, conf_ix, confs, null_size, seed):
     """Count null values >= each score over the materialized nulls."""
     null = nulls.ap_nulls(confs, null_size, seed, dtype=np.float64)
-    num = (null[conf_ix] >= scores[:, None] - nulls.TIE_TOL).sum(axis=1)
+    num = (null[conf_ix] >= nulls.tie_thresholds(scores)[:, None]).sum(axis=1)
     return (num + 1) / (null_size + 1)
