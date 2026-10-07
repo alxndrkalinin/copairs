@@ -201,7 +201,6 @@ def _rows_ap(pos_ptr, pos_vals, row_profile, neg_ptr, neg_vals):
     """AP of rows with sorted positive keys and their profile's negatives."""
     n_rows = len(row_profile)
     ap = np.empty(n_rows, dtype=np.float64)
-    n_neg = np.empty(n_rows, dtype=np.int64)
     for r in numba.prange(n_rows):
         lo, hi = pos_ptr[r], pos_ptr[r + 1]
         num_pos = hi - lo
@@ -210,8 +209,7 @@ def _rows_ap(pos_ptr, pos_vals, row_profile, neg_ptr, neg_vals):
         for e in range(neg_ptr[i], neg_ptr[i + 1]):
             hist[upper_bound(pos_vals, lo, hi, neg_vals[e]) - lo] += 1
         ap[r] = ap_from_counts(hist, 0, num_pos)
-        n_neg[r] = neg_ptr[i + 1] - neg_ptr[i]
-    return ap, n_neg
+    return ap
 
 
 def multilabel_ap(pos_pairs, pos_sims, pos_counts, neg_pairs, neg_sims, n):
@@ -247,6 +245,6 @@ def multilabel_ap(pos_pairs, pos_sims, pos_counts, neg_pairs, neg_sims, n):
     pos_ptr = np.append(pos_start, len(row_key)).astype(np.int64)
     neg_ptr, neg_vals = pair_csr(index_pairs(neg_pairs), np.asarray(neg_sims), n)
     profile = rows % n
-    ap, n_neg = _rows_ap(pos_ptr, end_keys, profile, neg_ptr, neg_vals)
+    ap = _rows_ap(pos_ptr, end_keys, profile, neg_ptr, neg_vals)
     num_pos = np.diff(pos_ptr)
-    return rows // n, profile, ap, num_pos, num_pos + n_neg
+    return rows // n, profile, ap, num_pos, num_pos + np.diff(neg_ptr)[profile]
