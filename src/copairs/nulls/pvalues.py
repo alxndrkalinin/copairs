@@ -137,6 +137,25 @@ def _count_ge_kernel(null, thr, ptr, counts, max_blocks):
             counts[lo + q] += run
 
 
+def _prepare(scores, conf_ix, confs, null_size, seed, backend):
+    """Thresholds, checked inputs and the null plan shared by the p-value functions.
+
+    For the CUDA backend the plan is uploaded to the GPU once.
+    """
+    thr = tie_thresholds(scores)
+    conf_ix = np.asarray(conf_ix, dtype=np.int64)
+    if len(conf_ix) and (conf_ix.min() < 0 or conf_ix.max() >= len(confs)):
+        raise ValueError(f"conf_ix must index the {len(confs)} rows of confs")
+    null_size = _check_null_size(null_size)
+    backend = resolve_backend(backend)
+    plan = null_plan(confs, resolve_seed(seed))
+    if backend == "cuda":
+        import cupy as cp
+
+        plan = tuple(cp.asarray(a) for a in plan)
+    return thr, conf_ix, null_size, backend, plan
+
+
 def _count_ge_device(null, thr, ptr, counts):
     from copairs.nulls import cuda
 
@@ -174,21 +193,11 @@ def ap_pvalues(
     progress_bar : bool
         Show a progress bar over chunks.
     """
-    thr = tie_thresholds(scores)
-    conf_ix = np.asarray(conf_ix, dtype=np.int64)
-    confs = np.asarray(confs)
-    if len(conf_ix) != len(thr):
-        raise ValueError(f"{len(thr)} scores but {len(conf_ix)} conf_ix")
-    if len(conf_ix) and (conf_ix.min() < 0 or conf_ix.max() >= len(confs)):
-        raise ValueError(f"conf_ix must index the {len(confs)} rows of confs")
-    null_size = _check_null_size(null_size)
-    seed = resolve_seed(seed)
-    backend = resolve_backend(backend)
-    plan = null_plan(confs, seed)
-    if backend == "cuda":  # upload the configurations once
-        import cupy as cp
-
-        plan = tuple(cp.asarray(a) for a in plan)
+    if len(conf_ix) != len(scores):
+        raise ValueError(f"{len(scores)} scores but {len(conf_ix)} conf_ix")
+    thr, conf_ix, null_size, backend, plan = _prepare(
+        scores, conf_ix, confs, null_size, seed, backend
+    )
     order = np.lexsort((thr, conf_ix))
     thr = thr[order]
     ptr = np.searchsorted(conf_ix[order], np.arange(len(confs) + 1))
@@ -273,23 +282,10 @@ def map_pvalues(
     ``p_g = (1 + #{null_g >= thr_g}) / (null_size + 1)``, with ``thr_g`` from
     :func:`tie_thresholds`.
     """
-    thr = tie_thresholds(map_scores)
     ptr = np.asarray(ptr, dtype=np.int64)
-    conf_ix = np.asarray(conf_ix, dtype=np.int64)
     conf_cnt = np.asarray(conf_cnt, dtype=np.int64)
-    confs = np.asarray(confs)
     if len(conf_cnt) != len(conf_ix):
         raise ValueError(f"{len(conf_ix)} conf_ix but {len(conf_cnt)} conf_cnt")
-    if len(conf_ix) and (conf_ix.min() < 0 or conf_ix.max() >= len(confs)):
-        raise ValueError(f"conf_ix must index the {len(confs)} rows of confs")
-    null_size = _check_null_size(null_size)
-    seed = resolve_seed(seed)
-    backend = resolve_backend(backend)
-    plan = null_plan(confs, seed)
-    if backend == "cuda":  # upload the configurations once
-        import cupy as cp
-
-        plan = tuple(cp.asarray(a) for a in plan)
     if (
         len(ptr) < 1
         or ptr[0] != 0
@@ -299,26 +295,26 @@ def map_pvalues(
         raise ValueError(
             "ptr must start at 0, end at len(conf_ix) and give every group a member"
         )
-    if len(thr) != len(ptr) - 1:
-        raise ValueError(f"{len(thr)} mAP scores but {len(ptr) - 1} groups in ptr")
-    n_group = np.add.reduceat(conf_cnt, ptr[:-1]) if len(conf_cnt) else conf_cnt
+    if len(map_scores) != len(ptr) - 1:
+        raise ValueError(
+            f"{len(map_scores)} mAP scores but {len(ptr) - 1} groups in ptr"
+        )
+    thr, conf_ix, null_size, backend, plan = _prepare(
+        map_scores, conf_ix, confs, null_size, seed, backend
+    )
     if len(thr) == 0:
         return np.zeros(0, dtype=np.float64)
+    n_group = np.add.reduceat(conf_cnt, ptr[:-1])
     if backend == "cuda":
         from copairs.nulls import cuda
 
         group = cuda.GroupCounter(ptr, conf_ix, conf_cnt, n_group, thr)
-    elif backend == "numba":
-        counts = np.zeros(len(thr), dtype=np.int64)
-        args = (ptr, conf_ix, conf_cnt, n_group, thr, counts)
-
-        def group(null):
-            _group_ge_numba(null, *args)
     else:
+        kernel = _group_ge_numba if backend == "numba" else _group_ge_host
         counts = np.zeros(len(thr), dtype=np.int64)
 
         def group(null):
-            _group_ge_host(null, ptr, conf_ix, conf_cnt, n_group, thr, counts)
+            kernel(null, ptr, conf_ix, conf_cnt, n_group, thr, counts)
 
     chunk = _chunk_size(null_size, len(confs), budget_bytes)
     n_work = -(-null_size // chunk)
