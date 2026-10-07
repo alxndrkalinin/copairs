@@ -206,9 +206,7 @@ def ap_from_pairs(
         bins = int(ptr[n]) + n
         n_chunks = budget_bytes // (8 * (bins + n))
         n_chunks = max(1, min(numba.get_num_threads(), n_chunks))
-        hist, n_neg = _negative_hist(
-            neg_pairs, _host(neg_sims), ptr, vals, n, n_chunks
-        )
+        hist, n_neg = _negative_hist(neg_pairs, _host(neg_sims), ptr, vals, n, n_chunks)
         ap = _ap_from_hist(ptr, hist, n)
         num_pos = np.diff(ptr)
     total = num_pos + n_neg

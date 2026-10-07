@@ -261,7 +261,7 @@ def test_pair_similarity_float32_overflow(backend):
 
 
 def test_ap_from_pairs_accepts_series_similarities():
-    """pandas similarities are host arrays, not CuPy arrays to copy back."""
+    """Pandas similarities are host arrays, not CuPy arrays to copy back."""
     pos, neg = np.array([[0, 1]]), np.array([[0, 2], [1, 2]])
     pos_sims, neg_sims = np.array([0.5]), np.array([0.1, 0.9])
     expected = fastap.ap_from_pairs(pos, neg, pos_sims, neg_sims, backend="numba")
