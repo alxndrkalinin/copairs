@@ -118,6 +118,15 @@ def test_array_label_cells_with_other_columns():
     np.testing.assert_array_equal(got, matching.find_pairs_multilabel(dframe, *args))
 
 
+def test_sorted_unique_pairs_match_numpy():
+    """The legacy pipeline's dedup of SQL pairs equals 0.5.5's np.unique(axis=0)."""
+    pairs = sql_pairs(label_frame(1), [], ["labels"], "labels")
+    pairs = np.concatenate([pairs[::-1], pairs[:50]])  # unsorted, with duplicates
+    np.testing.assert_array_equal(
+        matching.sorted_unique_pairs(pairs), np.unique(pairs, axis=0)
+    )
+
+
 @pytest.mark.parametrize(
     "labels,index",
     [

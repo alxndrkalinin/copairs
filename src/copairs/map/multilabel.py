@@ -8,7 +8,11 @@ import pandas as pd
 
 from copairs import fastap, compute
 from copairs.fastap import multilabel as fast_multilabel
-from copairs.matching import UnpairedException, find_pairs_multilabel
+from copairs.matching import (
+    UnpairedException,
+    sorted_unique_pairs,
+    find_pairs_multilabel,
+)
 
 from .filter import flatten_str_list, evaluate_and_filter, validate_pipeline_input
 from .normalization import normalize_ap
@@ -127,6 +131,9 @@ def average_precision(
     )
     if len(neg_pairs) == 0:
         raise UnpairedException("Unable to find any negative pairs.")
+    if method == "legacy":  # the fast matchers return sorted unique pairs
+        logger.info("Dropping dups in negative pairs...")
+        neg_pairs = sorted_unique_pairs(neg_pairs)
 
     logger.info("Computing positive similarities...")
     pos_sims = similarity(pos_pairs)

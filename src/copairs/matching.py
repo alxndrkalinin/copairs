@@ -595,7 +595,8 @@ def find_pairs_multilabel(
     -------
     np.ndarray
         Array of pairs of indices with matching or non-matching values in the specified columns.
-        With ``multilabel_col`` in ``diffby``, pairs ``(i < j)`` are unique and sorted.
+        With ``multilabel_col`` in ``diffby``, pairs ``(i < j)`` are unique, and
+        sorted with ``method="fast"``.
 
     Notes
     -----
@@ -688,13 +689,20 @@ def find_pairs_multilabel(
             )
         else:  # if multilabel_col is in diffby return only the index
             index_d = result.fetchnumpy()
-            # Sorted and unique, like the inverted-index matcher.
-            packed = np.unique(
-                (index_d["index"].astype(np.uint64) << np.uint64(32))
-                | index_d["index_1"].astype(np.uint64)
-            )
-            result = np.stack(
-                [packed >> np.uint64(32), packed & np.uint64(0xFFFFFFFF)], axis=1
-            ).astype(np.uint32)
+            result = np.array(
+                [index_d[k] for k in ("index", "index_1")], dtype=np.uint32
+            ).T
+            if method == "fast":  # sorted, like the inverted-index matcher
+                result = sorted_unique_pairs(result)
 
     return result
+
+
+def sorted_unique_pairs(pairs: np.ndarray) -> np.ndarray:
+    """``np.unique(pairs, axis=0)`` for uint32 ``(i, j)`` pairs, via packed keys."""
+    packed = np.unique(
+        (pairs[:, 0].astype(np.uint64) << np.uint64(32)) | pairs[:, 1].astype(np.uint64)
+    )
+    return np.stack(
+        [packed >> np.uint64(32), packed & np.uint64(0xFFFFFFFF)], axis=1
+    ).astype(np.uint32)
