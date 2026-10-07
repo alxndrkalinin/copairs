@@ -43,6 +43,23 @@ def test_ap_from_pairs_matches_rank_lists(backend, ties):
     np.testing.assert_allclose(got[1], expected[1], rtol=1e-12, atol=0)
 
 
+@pytest.mark.skipif("cuda" not in BACKENDS, reason="needs a CUDA device")
+def test_ap_from_pairs_cuda_negative_chunks(monkeypatch):
+    """Negatives streamed to the GPU in chunks give the same APs as one pass."""
+    from copairs.fastap import cuda
+
+    rng = np.random.default_rng(6)
+    pos, neg = random_pairs(rng, 200, 600, 10_000)
+    pos_sims = rng.random(len(pos)).astype(np.float32)
+    neg_sims = rng.random(len(neg)).astype(np.float32)
+    whole = fastap.ap_from_pairs(pos, neg, pos_sims, neg_sims, backend="cuda")
+    monkeypatch.setattr(cuda, "PAIR_CHUNK", 999)
+    for sims in (neg_sims, cuda.cp.asarray(neg_sims)):
+        got = fastap.ap_from_pairs(pos, neg, pos_sims, sims, backend="cuda")
+        for g, w in zip(got, whole):
+            np.testing.assert_array_equal(g, w)
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_ap_from_pairs_edge_cases(backend):
     """Profiles without positives get NaN; NaN similarities rank last."""

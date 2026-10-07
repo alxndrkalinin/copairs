@@ -4,7 +4,7 @@ import numpy as np
 
 from copairs.nulls import cuda as _null_cuda
 from copairs.fastap.draws import _chunk, unit_rows
-from copairs.fastap.ranking import sortable_keys
+from copairs.fastap.ranking import rank_keys, sortable_keys
 from copairs.fastap.similarity import PAIR_CHUNK
 
 cp = _null_cuda.cp
@@ -157,10 +157,13 @@ class PairSimilarity:
         return out.get() if as_numpy else out
 
 
-def ap_from_pairs(pos_pairs, neg_pairs, pos_keys, neg_keys, n: int):
-    """``(ap, num_pos, num_neg)`` of profiles ``0..n-1``, computed on the GPU."""
-    pos_pairs, neg_pairs = device_pairs(pos_pairs), device_pairs(neg_pairs)
-    neg_keys = cp.asarray(neg_keys, dtype=cp.float32)
+def ap_from_pairs(pos_pairs, neg_pairs, pos_keys, neg_sims, n: int):
+    """``(ap, num_pos, num_neg)`` of profiles ``0..n-1``, computed on the GPU.
+
+    Negative pairs and their keys reach the device a chunk at a time, so
+    beyond ``neg_sims`` the GPU holds only the positives and the histograms.
+    """
+    pos_pairs, neg_pairs = device_pairs(pos_pairs), neg_pairs.reshape(-1, 2)
     profile = pos_pairs.ravel()
     keys = cp.repeat(cp.asarray(pos_keys, dtype=cp.float32), 2)
     order = cp.argsort((profile.astype(cp.uint64) << 32) | sortable_keys(keys))
@@ -170,9 +173,11 @@ def ap_from_pairs(pos_pairs, neg_pairs, pos_keys, neg_keys, n: int):
     )
     hist = cp.zeros(int(ptr[-1]) + n, dtype=cp.uint64)
     n_neg = cp.zeros(n, dtype=cp.uint64)
-    if len(neg_pairs):
-        args = (neg_pairs, neg_keys, np.int64(len(neg_pairs)), ptr, vals, hist, n_neg)
-        _kernel("negative_hist")((_grid(2 * len(neg_pairs)),), (_BLOCK,), args)
+    for start in range(0, len(neg_pairs), PAIR_CHUNK):
+        pairs = device_pairs(neg_pairs[start : start + PAIR_CHUNK])
+        keys = cp.asarray(rank_keys(neg_sims[start : start + PAIR_CHUNK]))
+        args = (pairs, keys, np.int64(len(pairs)), ptr, vals, hist, n_neg)
+        _kernel("negative_hist")((_grid(2 * len(pairs)),), (_BLOCK,), args)
     ap = cp.empty(n, dtype=cp.float64)
     _kernel("ap_from_hist")((_grid(n),), (_BLOCK,), (ptr, hist, np.int64(n), ap))
     return ap.get(), cp.diff(ptr).get(), n_neg.get().astype(np.int64)

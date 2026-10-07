@@ -174,7 +174,7 @@ def ap_from_pairs(
         from copairs.fastap import cuda
 
         ap, num_pos, n_neg = cuda.ap_from_pairs(
-            pos_pairs, neg_pairs, rank_keys(pos_sims), rank_keys(neg_sims), n
+            pos_pairs, neg_pairs, rank_keys(pos_sims), neg_sims, n
         )
     elif backend == "numba":
         ptr, vals = _positive_csr(pos_pairs, rank_keys(pos_sims), n)
