@@ -26,11 +26,18 @@ def _upper_bound(vals, lo, hi, key):
     return lo
 
 
+def array_module(x):
+    """``cupy`` for a CuPy array, else ``numpy`` (CuPy stays an optional import)."""
+    if type(x).__module__.startswith("cupy"):
+        import cupy
+
+        return cupy
+    return np
+
+
 def sortable_keys(keys):
     """uint64 that orders like float32 ``keys`` in NumPy (NaN last); NumPy or CuPy."""
-    xp = np
-    if type(keys).__module__.startswith("cupy"):
-        import cupy as xp
+    xp = array_module(keys)
     keys = xp.where(xp.isnan(keys), xp.float32(np.nan), keys).astype(xp.float32)
     bits = keys.view(xp.uint32)
     flipped = xp.where(bits >> 31 == 1, ~bits, bits | xp.uint32(0x80000000))
@@ -39,9 +46,7 @@ def sortable_keys(keys):
 
 def rank_keys(sims):
     """Ranking keys of similarities, as computed by ``build_rank_lists`` (NumPy or CuPy)."""
-    xp = np
-    if type(sims).__module__.startswith("cupy"):
-        import cupy as xp
+    xp = array_module(sims)
     return xp.float32(1) - xp.asarray(sims, dtype=xp.float32)
 
 

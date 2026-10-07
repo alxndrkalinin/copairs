@@ -12,14 +12,14 @@ import numba
 import numpy as np
 
 from copairs.nulls import resolve_backend
-from copairs.fastap.ranking import ap_from_counts
+from copairs.fastap.ranking import array_module, ap_from_counts
 
 DEFAULT_BUDGET = 2**29
 
 
 def unit_rows(feats) -> np.ndarray:
     """float32 rows of unit norm; raises on non-finite or zero-norm rows."""
-    xp = _array_module(feats)
+    xp = array_module(feats)
     x = xp.asarray(feats, dtype=xp.float32)
     if not bool(xp.isfinite(x).all()):
         raise ValueError("non-finite features; clean them first")
@@ -27,14 +27,6 @@ def unit_rows(feats) -> np.ndarray:
     if bool((norms == 0).any()):
         raise ValueError("zero-norm feature vector; cosine similarity is undefined")
     return x / norms
-
-
-def _array_module(x):
-    if type(x).__module__.startswith("cupy"):
-        import cupy
-
-        return cupy
-    return np
 
 
 @numba.njit(parallel=True, cache=True)
