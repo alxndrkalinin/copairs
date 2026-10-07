@@ -91,7 +91,9 @@ def multilabel_pairs(dframe, sameby, diffby, multilabel_col):
     pairs, label = _label_pairs(ptr, rows)
     mono = None
     if len(sameby) or len(diffby):
-        mono = find_pairs(dframe, sameby, diffby).astype(np.int64)
+        # Only the compared columns: DuckDB would convert the label lists too.
+        columns = list(dict.fromkeys(sameby + diffby))
+        mono = find_pairs(dframe[columns], sameby, diffby).astype(np.int64)
         mono = np.sort(mono[:, 0] * n + mono[:, 1])
     return keys, pairs, label, mono, n
 

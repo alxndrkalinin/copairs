@@ -82,6 +82,19 @@ def test_disjoint_label_pairs_match_sql(sameby, diffby):
     assert (np.diff(keys) > 0).all() and (pairs[:, 0] < pairs[:, 1]).all()
 
 
+def test_array_label_cells_with_other_columns():
+    """NumPy array cells work with other columns; only those reach DuckDB."""
+    dframe = label_frame(3)
+    arrays = dframe.assign(labels=dframe["labels"].map(np.array))
+    args = (["labels"], ["plate"], "labels")
+    got = matching._find_pairs_multilabel_fast(arrays, *args)
+    for g, e in zip(got, matching.find_pairs_multilabel(dframe, *args)):
+        np.testing.assert_array_equal(g, e)
+    args = (["plate"], ["labels"], "labels")
+    got = matching._find_pairs_multilabel_fast(arrays, *args)
+    np.testing.assert_array_equal(got, matching.find_pairs_multilabel(dframe, *args))
+
+
 @pytest.mark.parametrize(
     "labels,index",
     [
