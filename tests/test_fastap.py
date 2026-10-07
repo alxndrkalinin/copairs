@@ -173,3 +173,16 @@ def test_draw_average_precisions_validation():
         )
     with pytest.raises(ValueError):
         fastap.draw_average_precisions(feats, [[0, 1]], [[2, 3]], backend="numpy")
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("metric", ["euclidean", "manhattan", "chebyshev"])
+def test_pair_similarity_nonfinite_features(backend, metric):
+    """Inf - inf differences give NaN similarities, as in the generic functions."""
+    feats = np.array([[np.inf, 1.0, 0.0], [np.inf, 0.0, 0.0], [1.0, 2.0, 3.0]])
+    pairs = np.array([[0, 1], [0, 2], [1, 2]])
+    with np.errstate(invalid="ignore"):
+        generic = compute.get_similarity_fn(metric, progress_bar=False)(feats, pairs, 8)
+    got = fastap.pair_similarity(feats, metric, backend)(pairs)
+    np.testing.assert_array_equal(np.isnan(got), np.isnan(generic))
+    np.testing.assert_allclose(got, generic, rtol=1e-6)

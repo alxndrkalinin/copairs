@@ -65,7 +65,7 @@ def _minkowski_pairs(x, pairs, kind, out):
                 acc += diff * diff
             elif kind == 1:
                 acc += diff
-            elif diff > acc:
+            elif diff > acc or np.isnan(diff):  # NaN propagates, as in np.max
                 acc = diff
         if kind == 0:
             acc = np.sqrt(acc)

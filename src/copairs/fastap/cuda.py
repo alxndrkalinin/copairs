@@ -31,6 +31,11 @@ __device__ void dot_pairs(const T* x, long long d, const long long* pairs, long 
     }
 }
 
+// max that propagates NaN, like np.max (fmax drops it).
+__device__ __forceinline__ double nan_max(double a, double b) {
+    return (isnan(a) || isnan(b)) ? (a + b) : fmax(a, b);
+}
+
 // 1 / (1 + distance); kind 0 = euclidean, 1 = manhattan, 2 = chebyshev.
 template <typename T>
 __device__ void minkowski_pairs(const T* x, long long d, const long long* pairs, long long n,
@@ -44,11 +49,11 @@ __device__ void minkowski_pairs(const T* x, long long d, const long long* pairs,
         double acc = 0.0;
         for (long long t = lane; t < d; t += 32) {
             double diff = fabs((double)a[t] - (double)b[t]);
-            acc = kind == 0 ? acc + diff * diff : kind == 1 ? acc + diff : fmax(acc, diff);
+            acc = kind == 0 ? acc + diff * diff : kind == 1 ? acc + diff : nan_max(acc, diff);
         }
         for (int off = 16; off > 0; off >>= 1) {
             double other = __shfl_down_sync(0xffffffffu, acc, off);
-            acc = kind == 2 ? fmax(acc, other) : acc + other;
+            acc = kind == 2 ? nan_max(acc, other) : acc + other;
         }
         if (lane == 0) out[p] = 1.0 / (1.0 + (kind == 0 ? sqrt(acc) : acc));
     }
