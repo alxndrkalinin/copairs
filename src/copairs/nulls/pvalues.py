@@ -103,15 +103,9 @@ def _count_ge_kernel(null, thr, ptr, counts, n_threads):
 
 
 def _count_ge_device(null, thr, ptr, counts):
-    import cupy as cp
+    from copairs.nulls import cuda
 
-    for c in range(null.shape[0]):
-        lo, hi = int(ptr[c]), int(ptr[c + 1])
-        if hi == lo:
-            continue
-        q = cp.searchsorted(thr[lo:hi], null[c], side="right")
-        hist = cp.bincount(q, minlength=hi - lo + 1)
-        counts[lo:hi] += cp.cumsum(hist[::-1])[::-1][1:]
+    cuda.count_ge(null, thr, ptr, counts)
 
 
 def ap_pvalues(

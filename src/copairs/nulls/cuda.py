@@ -308,3 +308,55 @@ class GroupCounter:
     def counts(self) -> np.ndarray:
         """Total exceedance count of each group."""
         return self._counts.get().astype(np.int64)
+
+
+_COUNT_GE = r"""
+// Bin (ptr[c] - ptr[0] + c) + q counts the samples of configuration c with exactly q
+// thresholds of its segment <= the sample (thresholds sorted, NaN last).
+extern "C" __global__ void exceed_hist(const double* null, long long size, long long n_conf,
+                                       const long long* ptr, const double* thr,
+                                       unsigned long long* hist) {
+    for (long long flat = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+         flat < n_conf * size; flat += (long long)gridDim.x * blockDim.x) {
+        long long c = flat / size;
+        long long lo = ptr[c], hi = ptr[c + 1];
+        if (hi == lo) continue;
+        double x = null[flat];
+        long long a = lo, b = hi;
+        while (a < b) {
+            long long mid = (a + b) >> 1;
+            double v = thr[mid];
+            if (!isnan(v) && v <= x) a = mid + 1; else b = mid;
+        }
+        atomicAdd(hist + (a - ptr[0] + c), 1ull);
+    }
+}
+
+// counts[p] += #{samples >= thr[p]}: the suffix sums of each configuration's bins.
+extern "C" __global__ void suffix_add(const long long* ptr, long long n_conf,
+                                      const unsigned long long* hist, long long* counts) {
+    for (long long c = blockIdx.x * (long long)blockDim.x + threadIdx.x; c < n_conf;
+         c += (long long)gridDim.x * blockDim.x) {
+        long long lo = ptr[c], hi = ptr[c + 1], off = lo - ptr[0] + c;
+        unsigned long long run = 0;
+        for (long long q = hi - lo - 1; q >= 0; --q) {
+            run += hist[off + q + 1];
+            counts[lo + q] += (long long)run;
+        }
+    }
+}
+"""
+
+
+def count_ge(null, thr, ptr, counts):
+    """GPU counterpart of ``pvalues._count_ge_host`` on device arrays."""
+    n_conf, size = null.shape
+    ptr = np.asarray(ptr, dtype=np.int64)
+    hist = cp.zeros(int(ptr[-1] - ptr[0]) + n_conf, dtype=cp.uint64)
+    ptr = cp.asarray(ptr)
+    null = cp.ascontiguousarray(null, dtype=cp.float64)
+    args = (null, np.int64(size), np.int64(n_conf), ptr, thr, hist)
+    kernel(_COUNT_GE, "exceed_hist")((grid(null.size),), (_BLOCK,), args)
+    kernel(_COUNT_GE, "suffix_add")(
+        (grid(n_conf),), (_BLOCK,), (ptr, np.int64(n_conf), hist, counts)
+    )
