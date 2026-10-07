@@ -94,7 +94,7 @@ def _harmonic_table(n: int, compensated: bool) -> np.ndarray:
             else:
                 comp += (x - t) + total
             total = t
-        out[k - 1] = total + comp if comp != 0.0 else total
+        out[k - 1] = total + comp
     return out
 
 
