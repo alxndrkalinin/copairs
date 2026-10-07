@@ -12,20 +12,7 @@ import numba
 import numpy as np
 
 from copairs.nulls import resolve_backend
-
-
-@numba.njit(inline="always")
-def _upper_bound(vals, lo, hi, key):
-    """First index in ``vals[lo:hi]`` ordered after ``key`` (NumPy order, NaN last)."""
-    key_nan = np.isnan(key)
-    while lo < hi:
-        mid = (lo + hi) >> 1
-        v = vals[mid]
-        if key_nan or (not np.isnan(v) and v <= key):
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo
+from copairs.nulls.pvalues import upper_bound
 
 
 def resolve_fast_backend(backend: str) -> str:
@@ -136,7 +123,7 @@ def _negative_hist(neg_pairs, neg_sims, ptr, vals, n, n_chunks):
             key = _rank_key(neg_sims[p])
             for side in range(2):
                 i = neg_pairs[p, side]
-                hist[c, _upper_bound(vals, ptr[i], ptr[i + 1], key) + i] += 1
+                hist[c, upper_bound(vals, ptr[i], ptr[i + 1], key) + i] += 1
                 n_neg[c, i] += 1
     return hist.sum(axis=0), n_neg.sum(axis=0)
 

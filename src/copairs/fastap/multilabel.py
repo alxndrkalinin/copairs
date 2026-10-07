@@ -14,11 +14,11 @@ import numpy as np
 import pandas as pd
 
 from copairs.matching import find_pairs
+from copairs.nulls.pvalues import upper_bound
 from copairs.fastap.ranking import (
-    index_pairs,
     pair_csr,
     rank_keys,
-    _upper_bound,
+    index_pairs,
     sortable_keys,
     ap_from_counts,
 )
@@ -207,7 +207,7 @@ def _rows_ap(pos_ptr, pos_vals, row_profile, neg_ptr, neg_vals):
         i = row_profile[r]
         hist = np.zeros(num_pos + 1, dtype=np.int64)
         for e in range(neg_ptr[i], neg_ptr[i + 1]):
-            hist[_upper_bound(pos_vals, lo, hi, neg_vals[e]) - lo] += 1
+            hist[upper_bound(pos_vals, lo, hi, neg_vals[e]) - lo] += 1
         ap[r] = ap_from_counts(hist, 0, num_pos)
         n_neg[r] = neg_ptr[i + 1] - neg_ptr[i]
     return ap, n_neg

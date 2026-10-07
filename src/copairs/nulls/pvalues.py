@@ -87,12 +87,13 @@ def _count_ge_host(null, thr, ptr, counts):
 
 
 @numba.njit(inline="always")
-def _upper_bound(vals, lo, hi, key):
-    """``lo`` plus #{vals[lo:hi] <= key} for sorted ``vals`` (NaN sorts last)."""
+def upper_bound(vals, lo, hi, key):
+    """First index in sorted ``vals[lo:hi]`` after ``key`` (NumPy order, NaN last)."""
+    key_nan = np.isnan(key)
     while lo < hi:
         mid = (lo + hi) >> 1
         v = vals[mid]
-        if not np.isnan(v) and v <= key:
+        if key_nan or (not np.isnan(v) and v <= key):
             lo = mid + 1
         else:
             hi = mid
@@ -125,7 +126,7 @@ def _count_ge_kernel(null, thr, ptr, counts, max_blocks):
             continue
         off = c - base
         for t in range(b * block, min(size, (b + 1) * block)):
-            partial[b, off + _upper_bound(thr, lo, hi, null[c, t])] += 1
+            partial[b, off + upper_bound(thr, lo, hi, null[c, t])] += 1
     for c in numba.prange(n_conf):
         lo, hi = ptr[c], ptr[c + 1]
         off = lo - base + c
