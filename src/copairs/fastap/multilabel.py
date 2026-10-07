@@ -1,0 +1,191 @@
+"""Multilabel pair matching and AP through an inverted label index.
+
+Pairs that share a label are enumerated per label from the label's members,
+so their cost is the number of such pairs. Pairs that share no label are all
+other candidate pairs; candidates are every pair, or the monolabel pairs of
+the remaining ``sameby``/``diffby`` columns. Rows whose labels cannot be
+indexed exactly (missing values inside lists, duplicate labels in a row,
+mixed label types, a non-default index) return None so callers can fall back
+to the SQL implementation.
+"""
+
+import numba
+import numpy as np
+import pandas as pd
+
+from copairs.fastap.ranking import rank_keys, _upper_bound
+
+
+def label_members(labels: pd.Series):
+    """Sorted distinct labels and the CSR of rows holding each, or None."""
+    if not all(isinstance(v, (list, tuple, np.ndarray)) for v in labels):
+        return None
+    sizes = np.array([len(v) for v in labels], dtype=np.int64)
+    flat = pd.Series([x for v in labels for x in v], dtype=object)
+    if flat.isna().any():
+        return None
+    rows = np.repeat(np.arange(len(labels)), sizes)
+    try:
+        keys, inv = np.unique(flat.to_numpy(), return_inverse=True)
+    except TypeError:  # labels of mixed, unorderable types
+        return None
+    if len({type(k) for k in keys}) > 1:
+        return None
+    order = np.lexsort((rows, inv))
+    rows, inv = rows[order], inv[order]
+    if (np.diff(inv * len(labels) + rows) == 0).any():
+        return None  # a row lists the same label twice
+    ptr = np.searchsorted(inv, np.arange(len(keys) + 1))
+    return keys, ptr, rows
+
+
+def _label_pairs(ptr, rows):
+    """Pairs ``(i < j)`` of rows sharing each label, grouped by label."""
+    pairs, label = [], []
+    for c in range(len(ptr) - 1):
+        members = rows[ptr[c] : ptr[c + 1]]
+        a, b = np.triu_indices(len(members), 1)
+        pairs.append(np.stack([members[a], members[b]], axis=1))
+        label.append(np.full(len(a), c))
+    if not pairs:
+        return np.empty((0, 2), dtype=np.int64), np.empty(0, dtype=np.int64)
+    return np.concatenate(pairs), np.concatenate(label)
+
+
+def _in_sorted(keys, sorted_keys):
+    if len(sorted_keys) == 0:
+        return np.zeros(len(keys), dtype=bool)
+    loc = np.minimum(np.searchsorted(sorted_keys, keys), len(sorted_keys) - 1)
+    return sorted_keys[loc] == keys
+
+
+def multilabel_pairs(dframe, sameby, diffby, multilabel_col, find_pairs):
+    """Fast :func:`copairs.matching.find_pairs_multilabel`, or None if unsupported.
+
+    ``sameby`` and ``diffby`` exclude ``multilabel_col``. Returns the same pair
+    set as the SQL implementation, with pairs sorted by label (sameby) or by
+    ``(i, j)`` (diffby).
+    """
+    if not isinstance(dframe, pd.DataFrame) or not dframe.index.equals(
+        pd.RangeIndex(len(dframe))
+    ):
+        return None
+    members = label_members(dframe[multilabel_col])
+    if members is None:
+        return None
+    keys, ptr, rows = members
+    n = len(dframe)
+    pairs, label = _label_pairs(ptr, rows)
+    mono = None
+    if len(sameby) or len(diffby):
+        mono = find_pairs(dframe, sameby, diffby).astype(np.int64)
+        mono = np.sort(mono[:, 0] * n + mono[:, 1])
+    return keys, pairs, label, mono, n
+
+
+def shared_label_pairs(dframe, sameby, diffby, multilabel_col, find_pairs):
+    """``(pairs, keys, counts)`` of rows sharing a label, or None."""
+    found = multilabel_pairs(dframe, sameby, diffby, multilabel_col, find_pairs)
+    if found is None:
+        return None
+    keys, pairs, label, mono, n = found
+    if mono is not None:
+        keep = _in_sorted(pairs[:, 0] * n + pairs[:, 1], mono)
+        pairs, label = pairs[keep], label[keep]
+    counts = np.bincount(label, minlength=len(keys))
+    present = counts > 0
+    return pairs.astype(np.uint32), keys[present], counts[present]
+
+
+def disjoint_label_pairs(dframe, sameby, diffby, multilabel_col, find_pairs):
+    """Sorted unique pairs ``(i < j)`` of rows sharing no label, or None."""
+    found = multilabel_pairs(dframe, sameby, diffby, multilabel_col, find_pairs)
+    if found is None:
+        return None
+    _, pairs, _, mono, n = found
+    shared = np.unique(pairs[:, 0] * n + pairs[:, 1])
+    if mono is None:
+        i, j = np.triu_indices(n, 1)
+        candidates = i * n + j
+    else:
+        candidates = mono
+    candidates = candidates[~_in_sorted(candidates, shared)]
+    return np.stack([candidates // n, candidates % n], axis=1).astype(np.uint32)
+
+
+@numba.njit(cache=True)
+def _profile_csr(pairs, keys, n):
+    """Keys of each profile's pairs (both endpoints) in CSR layout, unsorted."""
+    ptr = np.zeros(n + 1, dtype=np.int64)
+    for p in range(len(pairs)):
+        ptr[pairs[p, 0] + 1] += 1
+        ptr[pairs[p, 1] + 1] += 1
+    for i in range(n):
+        ptr[i + 1] += ptr[i]
+    fill = ptr[:-1].copy()
+    vals = np.empty(2 * len(pairs), dtype=keys.dtype)
+    for p in range(len(pairs)):
+        for side in range(2):
+            i = pairs[p, side]
+            vals[fill[i]] = keys[p]
+            fill[i] += 1
+    return ptr, vals
+
+
+@numba.njit(parallel=True, cache=True)
+def _rows_ap(pos_ptr, pos_vals, row_profile, neg_ptr, neg_vals):
+    """AP of rows with sorted positive keys and their profile's negatives."""
+    n_rows = len(row_profile)
+    ap = np.empty(n_rows, dtype=np.float64)
+    n_neg = np.empty(n_rows, dtype=np.int64)
+    for r in numba.prange(n_rows):
+        lo, hi = pos_ptr[r], pos_ptr[r + 1]
+        num_pos = hi - lo
+        i = row_profile[r]
+        hist = np.zeros(num_pos + 1, dtype=np.int64)
+        for e in range(neg_ptr[i], neg_ptr[i + 1]):
+            hist[_upper_bound(pos_vals, lo, hi, neg_vals[e]) - lo] += 1
+        before = 0
+        acc = 0.0
+        for t in range(num_pos):
+            before += hist[t]
+            acc += (t + 1) / (t + 1 + before)
+        ap[r] = acc / num_pos
+        n_neg[r] = neg_ptr[i + 1] - neg_ptr[i]
+    return ap, n_neg
+
+
+def multilabel_ap(pos_pairs, pos_sims, pos_counts, neg_pairs, neg_sims, n):
+    """AP of every (label, profile) with positives for that label.
+
+    Parameters
+    ----------
+    pos_pairs, pos_sims : np.ndarray
+        Positive pairs grouped by label, ``pos_counts[c]`` pairs for label ``c``.
+    neg_pairs, neg_sims : np.ndarray
+        Unique negative pairs; a profile's negatives are shared by its labels.
+    n : int
+        Number of profiles.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        ``label``, ``profile``, ``ap``, ``num_pos`` and ``total`` per row,
+        ordered by label and then profile, like copairs' per-label loop.
+    """
+    pos_pairs = np.asarray(pos_pairs, dtype=np.int64).reshape(-1, 2)
+    label = np.repeat(np.arange(len(pos_counts)), pos_counts)
+    ends = pos_pairs.ravel()
+    end_label = np.repeat(label, 2)
+    end_keys = np.repeat(rank_keys(pos_sims), 2)
+    row_key = end_label * n + ends
+    order = np.lexsort((end_keys, row_key))
+    row_key, end_keys = row_key[order], end_keys[order]
+    rows, pos_start = np.unique(row_key, return_index=True)
+    pos_ptr = np.append(pos_start, len(row_key)).astype(np.int64)
+    neg_pairs = np.ascontiguousarray(neg_pairs, dtype=np.int64).reshape(-1, 2)
+    neg_ptr, neg_vals = _profile_csr(neg_pairs, rank_keys(neg_sims), n)
+    profile = rows % n
+    ap, n_neg = _rows_ap(pos_ptr, end_keys, profile, neg_ptr, neg_vals)
+    num_pos = np.diff(pos_ptr)
+    return rows // n, profile, ap, num_pos, num_pos + n_neg

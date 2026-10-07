@@ -6,7 +6,8 @@ from typing import List
 import numpy as np
 import pandas as pd
 
-from copairs import compute
+from copairs import fastap, compute
+from copairs.fastap import multilabel as fast_multilabel
 from copairs.matching import UnpairedException, find_pairs_multilabel
 
 from .filter import flatten_str_list, evaluate_and_filter, validate_pipeline_input
@@ -79,11 +80,16 @@ def average_precision(
     batch_size=20000,
     distance="cosine",
     progress_bar: bool = True,
+    method: str = "fast",
+    backend: str = "auto",
 ) -> pd.DataFrame:
     """
     Compute average precision with multilabel support.
 
     Returns normalized_average_precision in addition to average_precision.
+    ``method`` and ``backend`` are as in :func:`copairs.map.average_precision`;
+    the fast method computes per-label APs on the CPU with Numba (``"cuda"``
+    accelerates similarities only).
 
     See Also
     --------
@@ -92,7 +98,19 @@ def average_precision(
     columns = flatten_str_list(pos_sameby, pos_diffby, neg_sameby, neg_diffby)
     meta, columns = evaluate_and_filter(meta, columns)
     validate_pipeline_input(meta, feats, columns)
+    compute._check_method(method)
+    if method == "fast":
+        backend = fastap.resolve_backend(backend)
+        if backend == "numpy":
+            method = "legacy"
     distance_fn = compute.get_similarity_fn(distance, progress_bar=progress_bar)
+    if method == "fast":
+        pair_similarity = fastap.pair_similarity(np.asarray(feats), distance, backend)
+        if pair_similarity is not None:
+
+            def distance_fn(feats, pairs, batch_size):
+                return pair_similarity(pairs)
+
     # Critical!, otherwise the indexing wont work
     meta = meta.reset_index(drop=True).copy()
 
@@ -113,13 +131,40 @@ def average_precision(
         raise UnpairedException("Unable to find any negative pairs.")
 
     logger.info("Dropping dups in negative pairs...")
-    neg_pairs = np.unique(neg_pairs, axis=0)
+    if method == "fast":
+        pair_keys = neg_pairs[:, 0].astype(np.int64) * len(meta) + neg_pairs[:, 1]
+        if not (np.diff(pair_keys) > 0).all():
+            pair_keys = np.unique(pair_keys)
+            neg_pairs = np.stack([pair_keys // len(meta), pair_keys % len(meta)], axis=1)
+            neg_pairs = neg_pairs.astype(np.uint32)
+    else:
+        neg_pairs = np.unique(neg_pairs, axis=0)
 
     logger.info("Computing positive similarities...")
     pos_sims = distance_fn(feats, pos_pairs, batch_size)
 
     logger.info("Computing negative similarities...")
     neg_sims = distance_fn(feats, neg_pairs, batch_size)
+
+    if method == "fast":
+        logger.info("Computing AP per label...")
+        label, ix, ap, num_pos, total = fast_multilabel.multilabel_ap(
+            pos_pairs, pos_sims, pos_counts, neg_pairs, neg_sims, len(meta)
+        )
+        results = pd.DataFrame(
+            {
+                "average_precision": ap,
+                "normalized_average_precision": normalize_ap(
+                    ap, num_pos, total - num_pos
+                ),
+                "n_pos_pairs": num_pos,
+                "n_total_pairs": total,
+                "ix": ix,
+                # A list, as the legacy per-label frames give, for the same dtype.
+                multilabel_col: np.asarray(keys)[label].tolist(),
+            }
+        )
+        return _merge_results(meta, results, multilabel_col)
 
     logger.info("Computing AP per label...")
     negs_for = _create_neg_query_solver(neg_pairs, neg_sims)
@@ -150,6 +195,10 @@ def average_precision(
         )
         results.append(result)
     results = pd.concat(results).reset_index(drop=True)
+    return _merge_results(meta, results, multilabel_col)
+
+
+def _merge_results(meta, results, multilabel_col):
     meta = meta.drop(multilabel_col, axis=1)
     results = meta.merge(results, right_on="ix", left_index=True).drop("ix", axis=1)
     results["n_pos_pairs"] = results["n_pos_pairs"].fillna(0).astype(np.uint32)
