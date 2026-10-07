@@ -253,3 +253,16 @@ def test_cuda_unavailable_when_kernels_cannot_compile(monkeypatch):
     finally:
         monkeypatch.undo()
         cuda.is_available.cache_clear()
+
+
+@pytest.mark.parametrize("seed", [0, 3, 2**33 + 7, 2**64 - 1])
+def test_config_key_arrays_match_scalar(seed):
+    """Vectorized configuration keys equal the scalar derivation."""
+    rng = np.random.default_rng(seed % 1000)
+    num_pos = rng.integers(1, 2**32 - 1, 500)
+    total = rng.integers(1, 2**32 - 1, 500)
+    k0, k1 = philox.config_key_arrays(seed, num_pos, total)
+    expected = [philox.config_key(seed, int(p), int(t)) for p, t in zip(num_pos, total)]
+    np.testing.assert_array_equal(
+        np.stack([k0, k1], axis=1), np.array(expected, dtype=np.uint64)
+    )

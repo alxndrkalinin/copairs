@@ -19,7 +19,7 @@ import math
 import numba
 import numpy as np
 
-from copairs.nulls.philox import M32, S32, uniform53, config_key, philox4x32
+from copairs.nulls.philox import M32, S32, uniform53, philox4x32, config_key_arrays
 
 # Use the guided gap search when the expected gap exceeds this many times the
 # number of remaining positives (its cost per probe); results are identical.
@@ -268,9 +268,8 @@ def null_plan(confs: np.ndarray, seed: int) -> tuple[np.ndarray, ...]:
     Callers sampling the same configurations chunk by chunk derive this once.
     """
     num_pos, total = _validate_confs(confs)
-    keys = [config_key(seed, int(p), int(t)) for p, t in zip(num_pos, total)]
-    keys = np.array(keys, dtype=np.uint64).reshape(-1, 2)
-    return num_pos, total, keys[:, 0].copy(), keys[:, 1].copy()
+    k0, k1 = config_key_arrays(seed, num_pos, total)
+    return num_pos, total, k0, k1
 
 
 def ap_nulls(

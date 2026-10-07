@@ -62,3 +62,23 @@ def config_key(seed: int, num_pos: int, total: int) -> tuple[int, int]:
         u(num_pos), u(total), u(seed & 0xFFFFFFFF), u(seed >> 32), SALT0, SALT1
     )
     return int(w[0]), int(w[1])
+
+
+def config_key_arrays(seed: int, num_pos: np.ndarray, total: np.ndarray):
+    """Vectorized :func:`config_key`: ``(k0, k1)`` arrays for many configurations."""
+    if not 0 <= seed < 2**64:
+        raise ValueError(f"seed must be in [0, 2**64), got {seed}")
+    num_pos, total = np.asarray(num_pos), np.asarray(total)
+    if len(num_pos) and (num_pos.max() >= 2**32 or total.max() >= 2**32):
+        raise ValueError("num_pos and total must be < 2**32")
+    u = np.uint64
+    n = len(num_pos)
+    w = philox4x32(
+        num_pos.astype(u),
+        total.astype(u),
+        np.full(n, seed & 0xFFFFFFFF, dtype=u),
+        np.full(n, seed >> 32, dtype=u),
+        SALT0,
+        SALT1,
+    )
+    return w[0], w[1]
