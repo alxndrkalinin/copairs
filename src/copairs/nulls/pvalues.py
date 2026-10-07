@@ -33,7 +33,7 @@ def resolve_seed(seed: int | None) -> int:
 
 
 def _chunk_size(null_size: int, rows: int, budget_bytes: int) -> int:
-    """Samples per chunk so that ``rows`` float64 nulls fit in the budget."""
+    """Return the samples per chunk that fit ``rows`` float64 nulls in the budget."""
     return max(1, min(null_size, budget_bytes // (8 * max(rows, 1))))
 
 
