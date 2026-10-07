@@ -61,8 +61,11 @@ We provide examples demonstrating how to use copairs for:
 ## Performance
 
 `average_precision`, `mean_average_precision` and the p-value functions take
-`method="fast"` (default) or `"legacy"`, and `backend="auto"`, `"cuda"`,
-`"numba"` or `"numpy"`.
+`method="fast"` (default) or `"legacy"`, and a `backend`. `"auto"` (default)
+picks `"cuda"` when CuPy can compile kernels for a visible GPU, else `"numba"`.
+The null and p-value functions also accept `"numpy"`, a slower reference
+implementation; the fast AP stage (`average_precision`, `multilabel`) runs on
+`"cuda"` or `"numba"` only, and its NumPy code is `method="legacy"`.
 
 - Null distributions are sampled exactly (Philox counter-based RNG, Vitter's
   Algorithm A) in O(1) memory per sample instead of permuting a
