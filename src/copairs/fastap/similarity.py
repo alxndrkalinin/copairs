@@ -20,14 +20,27 @@ FAST_METRICS = (
 )
 
 
+_ROW_BLOCK = 8192
+
+
 def _unit_rows(feats: np.ndarray, center: bool) -> np.ndarray:
-    """Rows scaled to unit norm (after centering for correlation)."""
-    x = np.asarray(feats, dtype=np.float64)
-    if center:
-        x = x - x.mean(axis=1, keepdims=True)
+    """Rows scaled to unit norm (after centering for correlation).
+
+    Computed in float64 one block of rows at a time, so the temporaries stay
+    small, and stored as float32 unless ``feats`` is float64.
+    """
+    out = np.empty(
+        feats.shape, dtype=np.float64 if feats.dtype == np.float64 else np.float32
+    )
     with np.errstate(divide="ignore", invalid="ignore"):
-        x = x / np.linalg.norm(x, axis=1, keepdims=True)
-    return x.astype(feats.dtype if feats.dtype == np.float64 else np.float32)
+        for start in range(0, len(feats), _ROW_BLOCK):
+            x = np.asarray(feats[start : start + _ROW_BLOCK], dtype=np.float64)
+            if center:
+                x = x - x.mean(axis=1, keepdims=True)
+            out[start : start + _ROW_BLOCK] = x / np.linalg.norm(
+                x, axis=1, keepdims=True
+            )
+    return out
 
 
 @numba.njit(parallel=True, fastmath={"reassoc", "contract"}, cache=True)
