@@ -11,6 +11,8 @@ import numpy as np
 from scipy.spatial.distance import _METRICS_NAMES as SCIPY_METRICS_NAMES
 from scipy.spatial.distance import cdist
 
+from copairs.methods import check_method
+
 
 def parallel_map(
     par_func: Callable[[int], None],
@@ -526,14 +528,6 @@ def null_dist_cached(
     return null_dist
 
 
-NULL_METHODS = ("fast", "legacy")
-
-
-def _check_method(method: str) -> None:
-    if method not in NULL_METHODS:
-        raise ValueError(f"unknown method {method!r}; expected one of {NULL_METHODS}")
-
-
 def get_null_dists(
     confs: np.ndarray,
     null_size: int,
@@ -575,7 +569,7 @@ def get_null_dists(
         A 2D float32 array where each row corresponds to a null distribution for a
         specific configuration.
     """
-    _check_method(method)
+    check_method(method)
     if method == "legacy":
         return _get_null_dists_legacy(confs, null_size, seed, cache_dir, progress_bar)
     from copairs import nulls
@@ -657,7 +651,7 @@ def p_values(
     np.ndarray
         An array of p-values corresponding to the input AP scores.
     """
-    _check_method(method)
+    check_method(method)
     # Identify unique configurations and their indices
     confs, rev_ix = np.unique(null_confs, axis=0, return_inverse=True)
 

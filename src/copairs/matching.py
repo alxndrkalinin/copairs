@@ -13,6 +13,8 @@ import numpy as np
 import duckdb
 import pandas as pd
 
+from copairs.methods import check_method
+
 logger = logging.getLogger("copairs")
 ColumnList = Union[Sequence[str], pd.Index]
 ColumnDict = Dict[str, ColumnList]
@@ -604,6 +606,7 @@ def find_pairs_multilabel(
     assert (multilabel_col in sameby) or (multilabel_col in diffby), (
         f"Missing {multilabel_col} in sameby and diffby"
     )
+    check_method(method)
 
     if isinstance(dframe, pd.DataFrame):
         # pandas groupby().unique() can produce ExtensionArray cells, which DuckDB
@@ -613,8 +616,6 @@ def find_pairs_multilabel(
         labels = _as_label_lists(dframe[multilabel_col])
         dframe = dframe.assign(**{multilabel_col: labels})
 
-    if method not in ("fast", "legacy"):
-        raise ValueError(f"unknown method {method!r}; expected fast or legacy")
     if method == "fast":
         fast = _find_pairs_multilabel_fast(dframe, sameby, diffby, multilabel_col)
         if fast is not None:

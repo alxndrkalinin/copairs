@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from copairs import compute
+from copairs.methods import check_method
 from copairs.map.hierarchical_fdr import (
     apply_fdr_correction,
     apply_hierarchical_fdr_correction,
@@ -77,7 +78,7 @@ def get_map_pvalue(
     ap_scores = ap_scores.query("~average_precision.isna() and n_pos_pairs > 0")
     ap_scores = ap_scores.reset_index(drop=True).copy()
 
-    compute._check_method(method)
+    check_method(method)
     null_confs = ap_scores[["n_pos_pairs", "n_total_pairs"]].values
     null_confs, rev_ix = np.unique(null_confs, axis=0, return_inverse=True)
     rev_ix = rev_ix.ravel()

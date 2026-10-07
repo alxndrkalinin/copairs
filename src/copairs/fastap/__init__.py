@@ -10,6 +10,7 @@ import numpy as np
 
 from copairs import compute
 from copairs.nulls import resolve_backend
+from copairs.methods import check_method
 from copairs.fastap.draws import draw_average_precisions
 from copairs.fastap.ranking import ap_from_pairs
 from copairs.fastap.similarity import FAST_METRICS, PairSimilarity
@@ -45,7 +46,7 @@ def setup(
     tuple
         ``(method, backend, similarity_fn)``.
     """
-    compute._check_method(method)
+    check_method(method)
     similarity_fn = compute.get_similarity_fn(distance, progress_bar=progress_bar)
     if method == "legacy":
         return method, backend, similarity_fn
