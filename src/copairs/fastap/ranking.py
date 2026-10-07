@@ -141,7 +141,8 @@ def _ap_from_hist(ptr, hist, n):
 
 
 def _host(x):
-    return x.get() if hasattr(x, "get") else x
+    """NumPy array of ``x``, copied from the GPU if it is a CuPy array."""
+    return x.get() if array_module(x) is not np else np.asarray(x)
 
 
 def ap_from_pairs(

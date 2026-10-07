@@ -1,6 +1,7 @@
 """Tests for fast pair similarities and counting-based average precision."""
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from copairs import nulls, fastap, compute
@@ -257,3 +258,14 @@ def test_pair_similarity_float32_overflow(backend):
     pairs = np.array([[0, 1], [0, 2]])
     got = fastap.pair_similarity(feats, "cosine", backend)(pairs)
     np.testing.assert_allclose(got, [0.8, 1.0], rtol=1e-6)
+
+
+def test_ap_from_pairs_accepts_series_similarities():
+    """pandas similarities are host arrays, not CuPy arrays to copy back."""
+    pos, neg = np.array([[0, 1]]), np.array([[0, 2], [1, 2]])
+    pos_sims, neg_sims = np.array([0.5]), np.array([0.1, 0.9])
+    expected = fastap.ap_from_pairs(pos, neg, pos_sims, neg_sims, backend="numba")
+    got = fastap.ap_from_pairs(
+        pos, neg, pd.Series(pos_sims), pd.Series(neg_sims), backend="numba"
+    )
+    np.testing.assert_array_equal(got[1], expected[1])

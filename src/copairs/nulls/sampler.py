@@ -307,8 +307,9 @@ def ap_nulls(
         ``(n, null_size)`` AP samples.
     """
     plan = null_plan(confs, seed)
-    out = _ap_nulls(plan, null_size, start, resolve_backend(backend), dtype)
-    return out.get() if hasattr(out, "get") else out
+    backend = resolve_backend(backend)
+    out = _ap_nulls(plan, null_size, start, backend, dtype)
+    return out.get() if backend == "cuda" else out
 
 
 def _ap_nulls(plan, null_size, start, backend, dtype):
