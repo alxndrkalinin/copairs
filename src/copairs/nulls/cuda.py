@@ -56,6 +56,43 @@ __device__ long long gap_loop(long long remaining, long long k, double u) {
     return gap;
 }
 
+// gap_loop run mostly in float32 (full rate on GPUs with few float64 units). A step
+// is decided in float32 only when the float32 product clears u by more than its
+// error bound relative to the float64 product; otherwise the float64 product is
+// replayed and the loop finishes in float64, so the gap equals gap_loop's.
+__device__ long long gap_loop_f32(long long remaining, long long k, double u) {
+    if (remaining >= (1LL << 24) || u < 1e-30) return gap_loop(remaining, k, u);
+    float uf = (float)u;
+    long long top = remaining - k, gap = 0;
+    float quot = (float)top / (float)remaining;
+    while (true) {
+        // |float32 product / float64 product - 1| <= (2 gap + 1) 2^-24 (1 + 2^-23), plus
+        // the roundings of uf and of the thresholds: covered twice over.
+        float band = (float)(2 * gap + 4) * 1.2e-7f;
+        if (quot > uf * (1.0f + band)) {
+            gap += 1;
+            top -= 1;
+            quot = quot * ((float)top / (float)(remaining - gap));
+            continue;
+        }
+        if (quot < uf * (1.0f - band)) return gap;
+        break;
+    }
+    // Too close to call: replay the float64 product to this gap and finish in float64.
+    long long t = remaining - k;
+    double q = (double)t / (double)remaining;
+    for (long long g = 1; g <= gap; ++g) {
+        t -= 1;
+        q = q * ((double)t / (double)(remaining - g));
+    }
+    while (q > u) {
+        gap += 1;
+        t -= 1;
+        q = q * ((double)t / (double)(remaining - gap));
+    }
+    return gap;
+}
+
 __device__ bool stops(long long remaining, long long k, long long g, double u, double log_u) {
     if ((double)(g + 1) / (double)(remaining - k + 1) <= FACTOR_LIMIT) {
         double acc = 0.0;
@@ -125,7 +162,7 @@ __device__ double ap_sample(long long num_pos, long long total, unsigned long lo
         } else if (remaining - k > GUIDED_RATIO * k * (k + 1)) {
             gap = gap_guided(remaining, k, u);
         } else {
-            gap = gap_loop(remaining, k, u);
+            gap = gap_loop_f32(remaining, k, u);
         }
         rank += gap + 1;
         i += 1;
