@@ -553,7 +553,6 @@ def _find_pairs_multilabel_fast(dframe, sameby, diffby, multilabel_col):
 
     if not isinstance(dframe, pd.DataFrame):
         return None
-    dframe = dframe.assign(**{multilabel_col: _as_label_lists(dframe[multilabel_col])})
     rest_same = [c for c in sameby if c != multilabel_col]
     rest_diff = [c for c in diffby if c != multilabel_col]
     if multilabel_col in sameby:
@@ -604,21 +603,19 @@ def find_pairs_multilabel(
         f"Missing {multilabel_col} in sameby and diffby"
     )
 
+    if isinstance(dframe, pd.DataFrame):
+        # pandas groupby().unique() can produce ExtensionArray cells, which DuckDB
+        # otherwise infers as VARCHAR instead of LIST. Keep NumPy arrays and
+        # missing cells intact; list(ndarray) would leave unsupported NumPy
+        # scalar elements.
+        labels = _as_label_lists(dframe[multilabel_col])
+        dframe = dframe.assign(**{multilabel_col: labels})
+
     fast = _find_pairs_multilabel_fast(dframe, sameby, diffby, multilabel_col)
     if fast is not None:
         return fast
 
     df = dframe.reset_index()
-    # pandas groupby().unique() can produce ExtensionArray cells, which DuckDB
-    # otherwise infers as VARCHAR instead of LIST. Keep NumPy arrays and missing
-    # cells intact; list(ndarray) would leave unsupported NumPy scalar elements.
-    df[multilabel_col] = df[multilabel_col].map(
-        lambda labels: (
-            labels.tolist()
-            if isinstance(labels, pd.api.extensions.ExtensionArray)
-            else labels
-        )
-    )
 
     if multilabel_col in sameby:
         sameby = copy(sameby)
