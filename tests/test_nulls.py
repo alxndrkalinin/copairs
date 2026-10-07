@@ -12,15 +12,9 @@ from tests.helpers import brute_ap_pvalues
 from copairs.map.normalization import expected_ap
 
 BACKENDS = nulls.available_backends()
-CPU_BACKENDS = [b for b in BACKENDS if b != "cuda"]
 CONFS = np.array(
     [[1, 1], [1, 7], [2, 2], [3, 10], [5, 20], [9, 49], [40, 45], [99, 1099], [3, 1000]]
 )
-
-
-def to_numpy(x):
-    """Return a NumPy array for NumPy or CuPy input."""
-    return x.get() if hasattr(x, "get") else np.asarray(x)
 
 
 def exact_null(num_pos, total):
@@ -64,22 +58,22 @@ def test_backends_bitwise_identical(backend):
             for c, (p, t) in enumerate(CONFS)
         ]
     )
-    out = to_numpy(nulls.ap_nulls(CONFS, 64, seed=3, backend=backend))
+    out = nulls.ap_nulls(CONFS, 64, seed=3, backend=backend)
     np.testing.assert_array_equal(out.view(np.uint32), ref.view(np.uint32))
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_chunks_and_prefixes(backend):
     """Sample j depends only on (seed, num_pos, total, j)."""
-    whole = to_numpy(nulls.ap_nulls(CONFS, 3000, seed=11, backend=backend))
+    whole = nulls.ap_nulls(CONFS, 3000, seed=11, backend=backend)
     parts = [
-        to_numpy(nulls.ap_nulls(CONFS, size, seed=11, start=start, backend=backend))
+        nulls.ap_nulls(CONFS, size, seed=11, start=start, backend=backend)
         for start, size in [(0, 1000), (1000, 1500), (2500, 500)]
     ]
     np.testing.assert_array_equal(np.concatenate(parts, axis=1), whole)
-    alone = to_numpy(nulls.ap_nulls(CONFS[[4]], 100, seed=11, backend=backend))
+    alone = nulls.ap_nulls(CONFS[[4]], 100, seed=11, backend=backend)
     np.testing.assert_array_equal(alone[0], whole[4, :100])
-    other_seed = to_numpy(nulls.ap_nulls(CONFS, 100, seed=12, backend=backend))
+    other_seed = nulls.ap_nulls(CONFS, 100, seed=12, backend=backend)
     assert not np.array_equal(other_seed, whole[:, :100])
 
 
