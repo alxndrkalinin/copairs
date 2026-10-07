@@ -7,6 +7,7 @@ NumPy and Numba backends.
 """
 
 import os
+import warnings
 import functools
 
 import numpy as np
@@ -233,11 +234,19 @@ def _probe(pid: int) -> bool:
     try:
         if cp.cuda.runtime.getDeviceCount() == 0:
             return False
+    except (RuntimeError, ImportError, OSError):
+        return False  # no driver, or CUDA libraries that fail to load
+    try:
         # A visible GPU is not enough: without NVRTC (e.g. CuPy without its
         # [ctk] extra or a CUDA Toolkit) every kernel fails to compile.
         cp.RawKernel(_PROBE, "probe", options=_OPTIONS).compile()
-    except (RuntimeError, ImportError, OSError, cp.cuda.compiler.CompileException):
-        # No device, an insufficient driver, or CUDA libraries that fail to load.
+    except (RuntimeError, ImportError, OSError, cp.cuda.compiler.CompileException) as e:
+        warnings.warn(
+            f"a CUDA device is visible but copairs' kernels fail to compile "
+            f"({type(e).__name__}: {e}); the CUDA backend is unavailable",
+            RuntimeWarning,
+            stacklevel=3,
+        )
         return False
     return True
 

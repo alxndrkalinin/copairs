@@ -270,7 +270,7 @@ def test_map_pvalues_validates_score_count(backend, n_scores):
 
 
 def test_cuda_unavailable_when_kernels_cannot_compile(monkeypatch):
-    """A visible GPU whose kernels fail to compile is not offered as a backend."""
+    """A visible GPU whose kernels fail to compile is not offered, with a warning."""
     from copairs.nulls import cuda
 
     if cuda.cp is None:
@@ -280,9 +280,11 @@ def test_cuda_unavailable_when_kernels_cannot_compile(monkeypatch):
         raise RuntimeError("NVRTC not found")
 
     monkeypatch.setattr(cuda.cp, "RawKernel", broken)
+    monkeypatch.setattr(cuda.cp.cuda.runtime, "getDeviceCount", lambda: 1)
     cuda._probe.cache_clear()
     try:
-        assert not cuda.is_available()
+        with pytest.warns(RuntimeWarning, match="fail to compile"):
+            assert not cuda.is_available()
         assert "cuda" not in nulls.available_backends()
     finally:
         monkeypatch.undo()
