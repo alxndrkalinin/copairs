@@ -190,6 +190,17 @@ def test_draw_average_precisions_validation():
         fastap.draw_average_precisions(feats, [[0, 1]], [[2, 3]], backend="numpy")
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("bad", [-1, 4])
+def test_draw_average_precisions_index_range(backend, bad):
+    """Indices outside feats raise instead of wrapping to other rows."""
+    feats = np.eye(4, dtype=np.float32)
+    with pytest.raises(ValueError, match="rows of feats"):
+        fastap.draw_average_precisions(feats, [[0, bad]], [[2, 3]], backend=backend)
+    with pytest.raises(ValueError, match="rows of feats"):
+        fastap.draw_average_precisions(feats, [[0, 1]], [[2, bad]], backend=backend)
+
+
 @pytest.mark.skipif("cuda" not in BACKENDS, reason="needs a CUDA device")
 def test_draw_average_precisions_beyond_shared_memory():
     """Draws with more queries than the CUDA kernel holds still get their APs."""

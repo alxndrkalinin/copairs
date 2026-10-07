@@ -113,6 +113,9 @@ def draw_average_precisions(
     m = references.shape[1]
     if k < 2:
         raise ValueError(f"need at least 2 queries per draw, got {k}")
+    for idx in (queries, references):
+        if idx.size and (idx.min() < 0 or idx.max() >= len(feats)):
+            raise ValueError(f"indices must address the {len(feats)} rows of feats")
     if backend == "cuda":
         from copairs.fastap import cuda
 
