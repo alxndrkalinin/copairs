@@ -127,3 +127,13 @@ def test_multilabel_ap_matches_legacy(backend):
     )
     for col in ["average_precision", "normalized_average_precision"]:
         np.testing.assert_allclose(fast[col], legacy[col], rtol=1e-12, atol=1e-15)
+
+
+def test_numeric_label_keys(monkeypatch):
+    """Integer labels give integer keys, equal to the SQL path's."""
+    dframe = pd.DataFrame({"labels": [[1, 2], [2], [1, 3], [3]]})
+    _, keys, counts = matching.find_pairs_multilabel(dframe, ["labels"], [], "labels")
+    _, sql_keys, sql_counts = sql_pairs(monkeypatch, dframe, ["labels"], [], "labels")
+    assert np.issubdtype(keys.dtype, np.integer)
+    np.testing.assert_array_equal(keys, sql_keys)
+    np.testing.assert_array_equal(counts, sql_counts)

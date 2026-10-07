@@ -31,6 +31,8 @@ def label_members(labels: pd.Series):
         return None
     if len({type(k) for k in keys}) > 1:
         return None
+    if len(keys) and not isinstance(keys[0], str):
+        keys = np.array(keys.tolist())  # numeric labels as a numeric array, like SQL
     order = np.lexsort((rows, inv))
     rows, inv = rows[order], inv[order]
     if (np.diff(inv * len(labels) + rows) == 0).any():
