@@ -229,11 +229,7 @@ extern "C" __global__ void draw_ap(const float* sims, int k, int m, long long n_
 
 def draw_average_precisions(feats, queries, references, normalized, budget_bytes):
     """CUDA backend of :func:`copairs.fastap.draws.draw_average_precisions`."""
-    x = (
-        cp.asarray(feats, dtype=cp.float32)
-        if normalized
-        else unit_rows(cp.asarray(feats))
-    )
+    x = unit_rows(cp.asarray(feats), normalized)
     idx = cp.asarray(np.concatenate([queries, references], axis=1))
     n_draws, k = queries.shape
     m = references.shape[1]

@@ -17,12 +17,17 @@ from copairs.fastap.ranking import array_module, ap_from_counts
 DEFAULT_BUDGET = 2**29
 
 
-def unit_rows(feats) -> np.ndarray:
-    """float32 rows of unit norm; raises on non-finite or zero-norm rows."""
+def unit_rows(feats, normalized: bool = False) -> np.ndarray:
+    """float32 rows of unit norm; raises on non-finite or zero-norm rows.
+
+    With ``normalized``, rows already have unit norm and are only checked.
+    """
     xp = array_module(feats)
     x = xp.asarray(feats, dtype=xp.float32)
     if not bool(xp.isfinite(x).all()):
         raise ValueError("non-finite features; clean them first")
+    if normalized:
+        return x
     norms = xp.linalg.norm(x, axis=1, keepdims=True)
     if bool((norms == 0).any()):
         raise ValueError("zero-norm feature vector; cosine similarity is undefined")
@@ -84,7 +89,8 @@ def draw_average_precisions(
     backend : str
         ``"auto"``, ``"cuda"`` or ``"numba"``.
     normalized : bool
-        Whether ``feats`` rows already have unit norm (skips normalization).
+        Whether ``feats`` rows already have unit norm (skips normalization;
+        features are still checked to be finite).
     budget_bytes : int
         Upper bound on gathered features and similarities held at once.
 
@@ -110,7 +116,7 @@ def draw_average_precisions(
         return cuda.draw_average_precisions(
             feats, queries, references, normalized, budget_bytes
         )
-    x = np.asarray(feats, dtype=np.float32) if normalized else unit_rows(feats)
+    x = unit_rows(feats, normalized)
     idx = np.concatenate([queries, references], axis=1)
     out = np.empty((n_draws, k), dtype=np.float64)
     step = _chunk(n_draws, k, m, x.shape[1], budget_bytes)

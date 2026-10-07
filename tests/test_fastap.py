@@ -176,6 +176,17 @@ def test_draw_average_precisions_validation():
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_draw_average_precisions_nonfinite_normalized(backend):
+    """Pre-normalized features are still checked: NaN would break the ranking."""
+    feats = np.eye(4, dtype=np.float32)
+    feats[1, 0] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        fastap.draw_average_precisions(
+            feats, [[0, 1]], [[2, 3]], backend=backend, normalized=True
+        )
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("metric", ["euclidean", "manhattan", "chebyshev"])
 def test_pair_similarity_nonfinite_features(backend, metric):
     """Inf - inf differences give NaN similarities, as in the generic functions."""
