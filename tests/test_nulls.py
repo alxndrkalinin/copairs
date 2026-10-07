@@ -219,6 +219,20 @@ def test_guided_gap_search_matches_loop(backend, num_pos, total):
         assert sampler._gap_guided(total, k, u) == sampler.gap_loop(total, k, u)
 
 
+@pytest.mark.parametrize("confs", [[[1.9, 5.9]], [[2, 5.5]], [[np.nan, 5]]])
+def test_ap_nulls_rejects_fractional_configurations(confs):
+    """Counts are not truncated: (1.9, 5.9) is not a (1, 5) configuration."""
+    with pytest.raises(ValueError, match="integer"):
+        nulls.ap_nulls(confs, 10, seed=1)
+
+
+def test_ap_nulls_accepts_integral_floats():
+    """Integral floats, e.g. counts that went through a float column, are fine."""
+    np.testing.assert_array_equal(
+        nulls.ap_nulls([[2.0, 5.0]], 10, seed=1), nulls.ap_nulls([[2, 5]], 10, seed=1)
+    )
+
+
 def test_ap_pvalues_validates_conf_ix():
     """Scores pointing outside confs raise instead of being dropped."""
     with pytest.raises(ValueError):

@@ -251,6 +251,8 @@ def _validate_confs(confs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         raise ValueError(f"confs must have shape (n, 2), got {confs.shape}")
     num_pos = confs[:, 0].astype(np.int64)
     total = confs[:, 1].astype(np.int64)
+    if (num_pos != confs[:, 0]).any() or (total != confs[:, 1]).any():
+        raise ValueError("configurations must be integer counts")
     if (num_pos < 1).any() or (total < num_pos).any():
         raise ValueError("each configuration needs 1 <= num_pos <= total")
     return num_pos, total
