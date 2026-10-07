@@ -194,9 +194,16 @@ def map_pvalues(
     confs = np.asarray(confs)
     seed = resolve_seed(seed)
     backend = resolve_backend(backend)
+    if (
+        len(ptr) < 1
+        or ptr[0] != 0
+        or ptr[-1] != len(conf_ix)
+        or (np.diff(ptr) < 1).any()
+    ):
+        raise ValueError(
+            "ptr must start at 0, end at len(conf_ix) and give every group a member"
+        )
     n_group = np.add.reduceat(conf_cnt, ptr[:-1]) if len(conf_cnt) else conf_cnt
-    if (np.diff(ptr) < 1).any():
-        raise ValueError("every group needs at least one member")
     thr = map_scores - TIE_TOL
     if backend == "cuda":
         from copairs.nulls import cuda

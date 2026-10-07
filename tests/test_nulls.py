@@ -230,3 +230,12 @@ def test_ap_pvalues_validates_conf_ix():
         nulls.ap_pvalues([0.0], [5], CONFS[:2], 10, seed=1)
     with pytest.raises(ValueError):
         nulls.ap_pvalues([0.0, 0.5], [0], CONFS[:2], 10, seed=1)
+
+
+@pytest.mark.parametrize("ptr", [[0, 1, 1], [0, 0, 1], [1, 2], [0, 1]])
+def test_map_pvalues_validates_groups(ptr):
+    """Empty groups and inconsistent CSR pointers raise ValueError."""
+    with pytest.raises(ValueError):
+        nulls.map_pvalues(
+            [0.1] * (len(ptr) - 1), ptr, [0, 1], [1, 1], CONFS[:2], 10, seed=1
+        )
