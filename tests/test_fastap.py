@@ -237,6 +237,17 @@ def test_average_precision_rejects_numpy_backend():
         average_precision(meta, feats, backend="numpy", **PIPELINE, progress_bar=False)
 
 
+def test_ap_from_pairs_resolves_backend():
+    """ap_from_pairs accepts "auto" and rejects NumPy like the pipeline does."""
+    pos, neg = np.array([[0, 1]]), np.array([[0, 2], [1, 2]])
+    pos_sims, neg_sims = np.array([0.5]), np.array([0.1, 0.9])
+    auto = fastap.ap_from_pairs(pos, neg, pos_sims, neg_sims, backend="auto")
+    numba = fastap.ap_from_pairs(pos, neg, pos_sims, neg_sims, backend="numba")
+    np.testing.assert_array_equal(auto[1], numba[1])
+    with pytest.raises(ValueError, match="no NumPy backend"):
+        fastap.ap_from_pairs(pos, neg, pos_sims, neg_sims, backend="numpy")
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_pair_similarity_float32_overflow(backend):
     """Rows whose float32 norm overflows get their cosine, not the generic 0."""

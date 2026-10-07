@@ -12,7 +12,7 @@ from copairs import compute
 from copairs.nulls import resolve_backend
 from copairs.methods import check_method
 from copairs.fastap.draws import draw_average_precisions
-from copairs.fastap.ranking import ap_from_pairs
+from copairs.fastap.ranking import ap_from_pairs, resolve_fast_backend
 from copairs.fastap.similarity import FAST_METRICS, PairSimilarity
 
 __all__ = [
@@ -56,12 +56,7 @@ def setup(
 
     if method == "legacy":
         return backend, similarity
-    backend = resolve_backend(backend)
-    if backend == "numpy":
-        raise ValueError(
-            "the fast AP stage has no NumPy backend; use backend='numba', or "
-            "method='legacy' for the NumPy implementation"
-        )
+    backend = resolve_fast_backend(backend)
     kernel = pair_similarity(np.asarray(feats), distance, backend)
     if kernel is not None:
         keep = {"as_numpy": False} if on_device and backend == "cuda" else {}

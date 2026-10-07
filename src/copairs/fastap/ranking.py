@@ -11,6 +11,8 @@ sort of all pairs.
 import numba
 import numpy as np
 
+from copairs.nulls import resolve_backend
+
 
 @numba.njit(inline="always")
 def _upper_bound(vals, lo, hi, key):
@@ -24,6 +26,17 @@ def _upper_bound(vals, lo, hi, key):
         else:
             hi = mid
     return lo
+
+
+def resolve_fast_backend(backend: str) -> str:
+    """Concrete backend of the fast AP stage, ``"cuda"`` or ``"numba"``."""
+    backend = resolve_backend(backend)
+    if backend == "numpy":
+        raise ValueError(
+            "the fast AP stage has no NumPy backend; use backend='numba', or "
+            "method='legacy' for copairs' NumPy implementation"
+        )
+    return backend
 
 
 def array_module(x):
@@ -148,7 +161,7 @@ def ap_from_pairs(
     pos_sims, neg_sims : np.ndarray
         Similarities of the pairs (NumPy, or CuPy to stay on the GPU).
     backend : str
-        ``"numba"`` or ``"cuda"``.
+        ``"auto"``, ``"numba"`` or ``"cuda"``.
     budget_bytes : int
         Upper bound on the per-thread negative histograms (Numba).
 
@@ -161,6 +174,7 @@ def ap_from_pairs(
     null_confs : np.ndarray
         ``(n, 2)`` uint32 ``(num_pos, total)`` of each profile in ``paired_ix``.
     """
+    backend = resolve_fast_backend(backend)
     n = 1 + max(
         int(pairs.max()) if pairs.size else -1 for pairs in (pos_pairs, neg_pairs)
     )
@@ -176,7 +190,7 @@ def ap_from_pairs(
         ap, num_pos, n_neg = cuda.ap_from_pairs(
             pos_pairs, neg_pairs, rank_keys(pos_sims), neg_sims, n
         )
-    elif backend == "numba":
+    else:
         ptr, vals = _positive_csr(pos_pairs, rank_keys(pos_sims), n)
         bins = int(ptr[n]) + n
         n_chunks = budget_bytes // (8 * (bins + n))
@@ -186,8 +200,6 @@ def ap_from_pairs(
         )
         ap = _ap_from_hist(ptr, hist, n)
         num_pos = np.diff(ptr)
-    else:
-        raise ValueError(f"unknown backend {backend!r}; expected numba or cuda")
     total = num_pos + n_neg
     paired_ix = np.flatnonzero(total)
     null_confs = np.stack([num_pos[paired_ix], total[paired_ix]], axis=1)
