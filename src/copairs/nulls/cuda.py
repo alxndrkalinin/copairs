@@ -6,6 +6,7 @@ and FMA contraction disabled, so it returns the same float32 values as the
 NumPy and Numba backends.
 """
 
+import os
 import functools
 
 import numpy as np
@@ -216,9 +217,17 @@ _BLOCK = 256
 _PROBE = 'extern "C" __global__ void probe(int* x) { if (x) *x = 1; }'
 
 
-@functools.cache
 def is_available() -> bool:
-    """Whether CuPy sees a CUDA device and can compile kernels for it (cached)."""
+    """Whether CuPy sees a CUDA device and can compile kernels for it.
+
+    Cached per process: a child forked after its parent initialised CUDA
+    cannot use it, so the child probes again and falls back to the CPU.
+    """
+    return _probe(os.getpid())
+
+
+@functools.cache
+def _probe(pid: int) -> bool:
     if cp is None:
         return False
     try:

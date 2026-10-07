@@ -1,6 +1,7 @@
 """Tests for the fast AP null sampler and streamed p-values."""
 
 import itertools
+import multiprocessing
 
 import numpy as np
 import pytest
@@ -256,13 +257,27 @@ def test_cuda_unavailable_when_kernels_cannot_compile(monkeypatch):
         raise RuntimeError("NVRTC not found")
 
     monkeypatch.setattr(cuda.cp, "RawKernel", broken)
-    cuda.is_available.cache_clear()
+    cuda._probe.cache_clear()
     try:
         assert not cuda.is_available()
         assert "cuda" not in nulls.available_backends()
     finally:
         monkeypatch.undo()
-        cuda.is_available.cache_clear()
+        cuda._probe.cache_clear()
+
+
+def _null_in_child():
+    return nulls.resolve_backend("auto"), nulls.ap_nulls(CONFS, 50, seed=4)
+
+
+@pytest.mark.skipif("cuda" not in BACKENDS, reason="needs a CUDA device")
+def test_forked_child_falls_back_to_cpu():
+    """A process forked after CUDA was initialised samples on the CPU."""
+    expected = nulls.ap_nulls(CONFS, 50, seed=4, backend="cuda")  # initialises CUDA
+    with multiprocessing.get_context("fork").Pool(1) as pool:
+        backend, null = pool.apply_async(_null_in_child).get(timeout=300)
+    assert backend == "numba"
+    np.testing.assert_array_equal(null, expected)
 
 
 @pytest.mark.parametrize("seed", [0, 3, 2**33 + 7, 2**64 - 1])
