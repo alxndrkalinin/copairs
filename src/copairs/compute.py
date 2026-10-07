@@ -584,7 +584,7 @@ def _get_null_dists_legacy(
     confs: np.ndarray,
     null_size: int,
     seed: int,
-    cache_dir: Optional[Union[str, Path]] = None,
+    cache_dir: str | Path | None = None,
     progress_bar: bool = True,
 ) -> np.ndarray:
     """Null distributions as computed by copairs <= 0.5.5 (``method="legacy"``)."""
