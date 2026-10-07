@@ -26,6 +26,17 @@ def _upper_bound(vals, lo, hi, key):
     return lo
 
 
+def sortable_keys(keys):
+    """uint64 that orders like float32 ``keys`` in NumPy (NaN last); NumPy or CuPy."""
+    xp = np
+    if type(keys).__module__.startswith("cupy"):
+        import cupy as xp
+    keys = xp.where(xp.isnan(keys), xp.float32(np.nan), keys).astype(xp.float32)
+    bits = keys.view(xp.uint32)
+    flipped = xp.where(bits >> 31 == 1, ~bits, bits | xp.uint32(0x80000000))
+    return flipped.astype(xp.uint64)
+
+
 def rank_keys(sims: np.ndarray) -> np.ndarray:
     """Ranking keys of similarities, as computed by ``build_rank_lists``."""
     return np.float32(1) - np.asarray(sims, dtype=np.float32)

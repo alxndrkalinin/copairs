@@ -14,7 +14,13 @@ import numpy as np
 import pandas as pd
 
 from copairs.matching import find_pairs
-from copairs.fastap.ranking import pair_csr, rank_keys, _upper_bound, ap_from_counts
+from copairs.fastap.ranking import (
+    pair_csr,
+    rank_keys,
+    _upper_bound,
+    sortable_keys,
+    ap_from_counts,
+)
 
 
 def label_members(labels: pd.Series):
@@ -192,7 +198,10 @@ def multilabel_ap(pos_pairs, pos_sims, pos_counts, neg_pairs, neg_sims, n):
     end_label = np.repeat(label, 2)
     end_keys = np.repeat(rank_keys(pos_sims), 2)
     row_key = end_label * n + ends
-    order = np.lexsort((end_keys, row_key))
+    if len(row_key) == 0 or row_key.max() < 2**32:
+        order = np.argsort((row_key.astype(np.uint64) << 32) | sortable_keys(end_keys))
+    else:
+        order = np.lexsort((end_keys, row_key))
     row_key, end_keys = row_key[order], end_keys[order]
     rows, pos_start = np.unique(row_key, return_index=True)
     pos_ptr = np.append(pos_start, len(row_key)).astype(np.int64)
