@@ -98,16 +98,14 @@ def get_map_pvalue(
     if method == "fast":
         from copairs import nulls
 
-        if len(map_scores) == 0:
-            map_scores["p_value"] = np.array([], dtype=np.float64)
-            return map_scores
         logger.info("Computing p-values...")
-        # (group, configuration) member counts in CSR layout.
-        sizes = map_scores["indices"].map(len).to_numpy()
-        group = np.repeat(np.arange(len(map_scores)), sizes)
-        rows = np.concatenate(map_scores["indices"].to_numpy()).astype(np.int64)
+        # (group, configuration) member counts in CSR layout; groups are numbered
+        # in map_scores' row order, and rows with missing keys belong to none.
+        group = ap_scores.groupby(sameby, observed=True).ngroup().to_numpy()
+        member = ~np.isnan(group)
         keys, conf_cnt = np.unique(
-            group * len(null_confs) + rev_ix[rows], return_counts=True
+            group[member].astype(np.int64) * len(null_confs) + rev_ix[member],
+            return_counts=True,
         )
         ptr = np.searchsorted(keys // len(null_confs), np.arange(len(map_scores) + 1))
         map_scores["p_value"] = nulls.map_pvalues(

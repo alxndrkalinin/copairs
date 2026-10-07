@@ -216,6 +216,8 @@ def map_pvalues(
             "ptr must start at 0, end at len(conf_ix) and give every group a member"
         )
     n_group = np.add.reduceat(conf_cnt, ptr[:-1]) if len(conf_cnt) else conf_cnt
+    if len(map_scores) == 0:
+        return np.zeros(0, dtype=np.float64)
     thr = map_scores - TIE_TOL
     if backend == "cuda":
         from copairs.nulls import cuda
