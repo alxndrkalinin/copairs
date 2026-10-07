@@ -15,6 +15,7 @@ import pandas as pd
 
 from copairs.matching import find_pairs
 from copairs.fastap.ranking import (
+    index_pairs,
     pair_csr,
     rank_keys,
     _upper_bound,
@@ -243,8 +244,7 @@ def multilabel_ap(pos_pairs, pos_sims, pos_counts, neg_pairs, neg_sims, n):
     row_key, end_keys = row_key[order], end_keys[order]
     rows, pos_start = np.unique(row_key, return_index=True)
     pos_ptr = np.append(pos_start, len(row_key)).astype(np.int64)
-    neg_pairs = np.ascontiguousarray(neg_pairs, dtype=np.int64).reshape(-1, 2)
-    neg_ptr, neg_vals = pair_csr(neg_pairs, rank_keys(neg_sims), n)
+    neg_ptr, neg_vals = pair_csr(index_pairs(neg_pairs), np.asarray(neg_sims), n)
     profile = rows % n
     ap, n_neg = _rows_ap(pos_ptr, end_keys, profile, neg_ptr, neg_vals)
     num_pos = np.diff(pos_ptr)

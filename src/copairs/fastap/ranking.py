@@ -76,8 +76,8 @@ def index_pairs(pairs):
 
 
 @numba.njit(cache=True)
-def pair_csr(pairs, keys, n):
-    """Keys of each profile's pairs (both endpoints) in CSR layout, unsorted."""
+def pair_csr(pairs, sims, n):
+    """Rank keys of each profile's pairs (both endpoints) in CSR layout, unsorted."""
     ptr = np.zeros(n + 1, dtype=np.int64)
     for p in range(len(pairs)):
         ptr[pairs[p, 0] + 1] += 1
@@ -85,11 +85,12 @@ def pair_csr(pairs, keys, n):
     for i in range(n):
         ptr[i + 1] += ptr[i]
     fill = ptr[:-1].copy()
-    vals = np.empty(2 * len(pairs), dtype=keys.dtype)
+    vals = np.empty(2 * len(pairs), dtype=np.float32)
     for p in range(len(pairs)):
+        key = _rank_key(sims[p])
         for side in range(2):
             i = pairs[p, side]
-            vals[fill[i]] = keys[p]
+            vals[fill[i]] = key
             fill[i] += 1
     return ptr, vals
 
@@ -100,9 +101,9 @@ def _sort_segments(ptr, vals):
         vals[ptr[i] : ptr[i + 1]] = np.sort(vals[ptr[i] : ptr[i + 1]])
 
 
-def _positive_csr(pairs, keys, n):
-    """Positive keys of each profile, sorted, in CSR layout."""
-    ptr, vals = pair_csr(pairs, keys, n)
+def _positive_csr(pairs, sims, n):
+    """Positive rank keys of each profile, sorted, in CSR layout."""
+    ptr, vals = pair_csr(pairs, sims, n)
     _sort_segments(ptr, vals)
     return ptr, vals
 
@@ -201,7 +202,7 @@ def ap_from_pairs(
         )
     else:
         pos_pairs, neg_pairs = index_pairs(pos_pairs), index_pairs(neg_pairs)
-        ptr, vals = _positive_csr(pos_pairs, rank_keys(_host(pos_sims)), n)
+        ptr, vals = _positive_csr(pos_pairs, _host(pos_sims), n)
         bins = int(ptr[n]) + n
         n_chunks = budget_bytes // (8 * (bins + n))
         n_chunks = max(1, min(numba.get_num_threads(), n_chunks))
