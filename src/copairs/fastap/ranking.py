@@ -37,9 +37,12 @@ def sortable_keys(keys):
     return flipped.astype(xp.uint64)
 
 
-def rank_keys(sims: np.ndarray) -> np.ndarray:
-    """Ranking keys of similarities, as computed by ``build_rank_lists``."""
-    return np.float32(1) - np.asarray(sims, dtype=np.float32)
+def rank_keys(sims):
+    """Ranking keys of similarities, as computed by ``build_rank_lists`` (NumPy or CuPy)."""
+    xp = np
+    if type(sims).__module__.startswith("cupy"):
+        import cupy as xp
+    return xp.float32(1) - xp.asarray(sims, dtype=xp.float32)
 
 
 @numba.njit(cache=True)
@@ -119,6 +122,10 @@ def _ap_from_hist(ptr, hist, n):
     return ap
 
 
+def _host(x):
+    return x.get() if hasattr(x, "get") else x
+
+
 def ap_from_pairs(
     pos_pairs: np.ndarray,
     neg_pairs: np.ndarray,
@@ -134,7 +141,7 @@ def ap_from_pairs(
     pos_pairs, neg_pairs : np.ndarray
         ``(n, 2)`` profile indices of positive and negative pairs.
     pos_sims, neg_sims : np.ndarray
-        Similarities of the pairs.
+        Similarities of the pairs (NumPy, or CuPy to stay on the GPU).
     backend : str
         ``"numba"`` or ``"cuda"``.
     budget_bytes : int
@@ -149,11 +156,15 @@ def ap_from_pairs(
     null_confs : np.ndarray
         ``(n, 2)`` uint32 ``(num_pos, total)`` of each profile in ``paired_ix``.
     """
-    pos_pairs = np.ascontiguousarray(pos_pairs, dtype=np.int64).reshape(-1, 2)
-    neg_pairs = np.ascontiguousarray(neg_pairs, dtype=np.int64).reshape(-1, 2)
-    n = int(max(pos_pairs.max(initial=-1), neg_pairs.max(initial=-1))) + 1
+    n = 1 + max(
+        int(pairs.max()) if pairs.size else -1 for pairs in (pos_pairs, neg_pairs)
+    )
     if backend == "cuda" and n >= 2**32:
         backend = "numba"  # the GPU sort packs profile indices into 32 bits
+    if backend != "cuda":
+        pos_pairs = np.ascontiguousarray(pos_pairs, dtype=np.int64).reshape(-1, 2)
+        neg_pairs = np.ascontiguousarray(neg_pairs, dtype=np.int64).reshape(-1, 2)
+        pos_sims, neg_sims = _host(pos_sims), _host(neg_sims)
     if backend == "cuda":
         from copairs.fastap import cuda
 

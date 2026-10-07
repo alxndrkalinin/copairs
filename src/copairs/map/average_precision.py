@@ -191,7 +191,7 @@ def average_precision(
 
     # Get the distance function for similarity calculations (e.g., cosine)
     method, backend, similarity_fn = fastap.setup(
-        method, backend, feats, distance, progress_bar
+        method, backend, feats, distance, progress_bar, on_device=True
     )
 
     # Reset metadata index for consistent indexing

@@ -115,6 +115,11 @@ def _kernel(name: str):
     return _null_cuda.kernel(_SOURCE, name)
 
 
+def device_pairs(pairs):
+    """Contiguous int64 ``(n, 2)`` pairs on the device, cast there, not on the host."""
+    return cp.ascontiguousarray(cp.asarray(pairs).reshape(-1, 2).astype(cp.int64))
+
+
 class PairSimilarity:
     """GPU counterpart of :class:`copairs.fastap.similarity.PairSimilarity`."""
 
@@ -125,7 +130,7 @@ class PairSimilarity:
 
     def __call__(self, pairs, as_numpy: bool = True):
         """float32 similarity of each ``(i, j)`` row of ``pairs``."""
-        pairs = cp.ascontiguousarray(cp.asarray(pairs, dtype=cp.int64).reshape(-1, 2))
+        pairs = device_pairs(pairs)
         n, d = len(pairs), self.x.shape[1]
         out = cp.empty(n, dtype=cp.float64)
         if n:
@@ -147,10 +152,7 @@ class PairSimilarity:
 
 def ap_from_pairs(pos_pairs, neg_pairs, pos_keys, neg_keys, n: int):
     """``(ap, num_pos, num_neg)`` of profiles ``0..n-1``, computed on the GPU."""
-    pos_pairs = cp.asarray(pos_pairs, dtype=cp.int64).reshape(-1, 2)
-    neg_pairs = cp.ascontiguousarray(
-        cp.asarray(neg_pairs, dtype=cp.int64).reshape(-1, 2)
-    )
+    pos_pairs, neg_pairs = device_pairs(pos_pairs), device_pairs(neg_pairs)
     neg_keys = cp.asarray(neg_keys, dtype=cp.float32)
     profile = pos_pairs.ravel()
     keys = cp.repeat(cp.asarray(pos_keys, dtype=cp.float32), 2)

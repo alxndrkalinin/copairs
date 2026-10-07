@@ -25,12 +25,20 @@ __all__ = [
 ]
 
 
-def setup(method: str, backend: str, feats, distance, progress_bar: bool):
+def setup(
+    method: str,
+    backend: str,
+    feats,
+    distance,
+    progress_bar: bool,
+    on_device: bool = False,
+):
     """Resolve the AP stage's method and backend and pick its similarity function.
 
     ``backend="numpy"`` selects the legacy NumPy implementation. The returned
     function has ``compute.get_similarity_fn``'s ``(feats, pairs, batch_size)``
-    signature and uses a kernel when ``distance`` has one.
+    signature and uses a kernel when ``distance`` has one; with ``on_device``,
+    a CUDA kernel's similarities stay on the GPU for :func:`ap_from_pairs`.
 
     Returns
     -------
@@ -46,9 +54,10 @@ def setup(method: str, backend: str, feats, distance, progress_bar: bool):
         return "legacy", backend, similarity_fn
     kernel = pair_similarity(np.asarray(feats), distance, backend)
     if kernel is not None:
+        keep = {"as_numpy": False} if on_device and backend == "cuda" else {}
 
         def similarity_fn(feats, pairs, batch_size):
-            return kernel(pairs)
+            return kernel(pairs, **keep)
 
     return method, backend, similarity_fn
 
