@@ -69,17 +69,21 @@ def _upper_bound(vals, lo, hi, key):
     return lo
 
 
+# Upper bound on the per-block histograms of _count_ge_numba.
+_HIST_BYTES = 2**28
+
+
 def _count_ge_numba(null, thr, ptr, counts):
     """:func:`_count_ge_host` in parallel over configurations and sample blocks."""
-    _count_ge_kernel(
-        np.ascontiguousarray(null), thr, ptr, counts, numba.get_num_threads()
-    )
+    bins = int(ptr[-1] - ptr[0]) + null.shape[0]
+    max_blocks = min(4 * numba.get_num_threads(), max(1, _HIST_BYTES // (8 * bins)))
+    _count_ge_kernel(np.ascontiguousarray(null), thr, ptr, counts, max_blocks)
 
 
 @numba.njit(parallel=True, cache=True)
-def _count_ge_kernel(null, thr, ptr, counts, n_threads):
+def _count_ge_kernel(null, thr, ptr, counts, max_blocks):
     n_conf, size = null.shape
-    n_blocks = max(1, min((size + (1 << 16) - 1) >> 16, 4 * n_threads))
+    n_blocks = max(1, min((size + (1 << 16) - 1) >> 16, max_blocks))
     block = (size + n_blocks - 1) // n_blocks
     base = ptr[0]
     partial = np.zeros((n_blocks, ptr[n_conf] - base + n_conf), dtype=np.int64)
