@@ -236,6 +236,15 @@ def test_map_pvalues_validates_groups(ptr):
         )
 
 
+@pytest.mark.parametrize(
+    "conf_ix,conf_cnt", [([0, 2], [1, 1]), ([-1, 0], [1, 1]), ([0, 1], [1])]
+)
+def test_map_pvalues_validates_members(conf_ix, conf_cnt):
+    """Configuration indices outside confs, or counts per member, raise."""
+    with pytest.raises(ValueError, match="conf_"):
+        nulls.map_pvalues([0.1, 0.2], [0, 1, 2], conf_ix, conf_cnt, CONFS[:2], 10, 1)
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("n_scores", [1, 3])
 def test_map_pvalues_validates_score_count(backend, n_scores):

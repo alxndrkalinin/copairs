@@ -277,6 +277,10 @@ def map_pvalues(
     conf_ix = np.asarray(conf_ix, dtype=np.int64)
     conf_cnt = np.asarray(conf_cnt, dtype=np.int64)
     confs = np.asarray(confs)
+    if len(conf_cnt) != len(conf_ix):
+        raise ValueError(f"{len(conf_ix)} conf_ix but {len(conf_cnt)} conf_cnt")
+    if len(conf_ix) and (conf_ix.min() < 0 or conf_ix.max() >= len(confs)):
+        raise ValueError(f"conf_ix must index the {len(confs)} rows of confs")
     null_size = _check_null_size(null_size)
     seed = resolve_seed(seed)
     backend = resolve_backend(backend)
