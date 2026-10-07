@@ -32,8 +32,13 @@ def resolve_seed(seed: int | None) -> int:
     return seed
 
 
+def _chunk_size(null_size: int, rows: int, budget_bytes: int) -> int:
+    """Samples per chunk so that ``rows`` float64 nulls fit in the budget."""
+    return max(1, min(null_size, budget_bytes // (8 * max(rows, 1))))
+
+
 def _chunks(null_size: int, rows: int, budget_bytes: int) -> list[tuple[int, int]]:
-    size = max(1, min(null_size, budget_bytes // (8 * max(rows, 1))))
+    size = _chunk_size(null_size, rows, budget_bytes)
     return [(s, min(size, null_size - s)) for s in range(0, null_size, size)]
 
 
@@ -93,7 +98,7 @@ def _count_ge_kernel(null, thr, ptr, counts, max_blocks):
         lo, hi = ptr[c], ptr[c + 1]
         if hi == lo:
             continue
-        off = lo - base + c - lo
+        off = c - base
         for t in range(b * block, min(size, (b + 1) * block)):
             partial[b, off + _upper_bound(thr, lo, hi, null[c, t])] += 1
     for c in numba.prange(n_conf):
@@ -161,7 +166,7 @@ def ap_pvalues(
     ptr = np.searchsorted(conf_ix[order], np.arange(len(confs) + 1))
     # Process configurations in batches whose chunk of samples fits the budget.
     sample_chunks = _chunks(null_size, 1, budget_bytes)
-    chunk = max(1, min(null_size, budget_bytes // 8))
+    chunk = _chunk_size(null_size, 1, budget_bytes)
     batch = max(1, budget_bytes // (8 * chunk))
     work = [
         (b, start, size)
