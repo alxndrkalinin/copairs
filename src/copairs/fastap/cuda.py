@@ -3,6 +3,7 @@
 import numpy as np
 
 from copairs.nulls import cuda as _null_cuda
+from copairs.fastap.ranking import sortable_keys
 
 cp = _null_cuda.cp
 _BLOCK = _null_cuda._BLOCK
@@ -144,14 +145,6 @@ class PairSimilarity:
         return out.get() if as_numpy else out
 
 
-def _sortable(keys):
-    """uint64 that orders like float32 ``keys`` in NumPy (NaN last)."""
-    keys = cp.where(cp.isnan(keys), cp.float32(np.nan), keys).astype(cp.float32)
-    bits = keys.view(cp.uint32)
-    flipped = cp.where(bits >> 31 == 1, ~bits, bits | cp.uint32(0x80000000))
-    return flipped.astype(cp.uint64)
-
-
 def ap_from_pairs(pos_pairs, neg_pairs, pos_keys, neg_keys, n: int):
     """``(ap, num_pos, num_neg)`` of profiles ``0..n-1``, computed on the GPU."""
     pos_pairs = cp.asarray(pos_pairs, dtype=cp.int64).reshape(-1, 2)
@@ -161,7 +154,7 @@ def ap_from_pairs(pos_pairs, neg_pairs, pos_keys, neg_keys, n: int):
     neg_keys = cp.asarray(neg_keys, dtype=cp.float32)
     profile = pos_pairs.ravel()
     keys = cp.repeat(cp.asarray(pos_keys, dtype=cp.float32), 2)
-    order = cp.argsort((profile.astype(cp.uint64) << 32) | _sortable(keys))
+    order = cp.argsort((profile.astype(cp.uint64) << 32) | sortable_keys(keys))
     vals = cp.ascontiguousarray(keys[order])
     ptr = cp.searchsorted(profile[order], cp.arange(n + 1, dtype=cp.int64))
     hist = cp.zeros(int(ptr[-1]) + n, dtype=cp.uint64)
