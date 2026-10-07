@@ -191,7 +191,7 @@ def average_precision(
     validate_pipeline_input(meta, feats, columns)
 
     # Get the distance function for similarity calculations (e.g., cosine)
-    method, backend, similarity = fastap.setup(
+    backend, similarity = fastap.setup(
         method, backend, feats, distance, batch_size, progress_bar, on_device=True
     )
 

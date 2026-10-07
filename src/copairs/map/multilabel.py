@@ -102,7 +102,7 @@ def average_precision(
     columns = flatten_str_list(pos_sameby, pos_diffby, neg_sameby, neg_diffby)
     meta, columns = evaluate_and_filter(meta, columns)
     validate_pipeline_input(meta, feats, columns)
-    method, backend, similarity = fastap.setup(
+    backend, similarity = fastap.setup(
         method, backend, feats, distance, batch_size, progress_bar
     )
     # Critical!, otherwise the indexing wont work

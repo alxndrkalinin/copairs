@@ -35,7 +35,7 @@ def setup(
     progress_bar: bool,
     on_device: bool = False,
 ):
-    """Resolve the AP stage's method and backend and bind its similarity function.
+    """Resolve the AP stage's backend and bind its similarity function.
 
     The fast AP stage runs on ``"cuda"`` or ``"numba"``; for the NumPy
     implementation use ``method="legacy"``. The returned function maps pairs
@@ -46,7 +46,7 @@ def setup(
     Returns
     -------
     tuple
-        ``(method, backend, similarity)``.
+        ``(backend, similarity)``.
     """
     check_method(method)
     generic = compute.get_similarity_fn(distance, progress_bar=progress_bar)
@@ -55,7 +55,7 @@ def setup(
         return generic(feats, pairs, batch_size)
 
     if method == "legacy":
-        return method, backend, similarity
+        return backend, similarity
     backend = resolve_backend(backend)
     if backend == "numpy":
         raise ValueError(
@@ -69,7 +69,7 @@ def setup(
         def similarity(pairs):
             return kernel(pairs, **keep)
 
-    return method, backend, similarity
+    return backend, similarity
 
 
 def pair_similarity(feats: np.ndarray, distance, backend: str):
