@@ -235,6 +235,16 @@ def test_map_pvalues_validates_groups(ptr):
         )
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("n_scores", [1, 3])
+def test_map_pvalues_validates_score_count(backend, n_scores):
+    """One mAP score per group; the kernels would read past a shorter array."""
+    with pytest.raises(ValueError, match="groups"):
+        nulls.map_pvalues(
+            [0.1] * n_scores, [0, 1, 2], [0, 1], [1, 1], CONFS[:2], 10, 1, backend
+        )
+
+
 def test_cuda_unavailable_when_kernels_cannot_compile(monkeypatch):
     """A visible GPU whose kernels fail to compile is not offered as a backend."""
     from copairs.nulls import cuda

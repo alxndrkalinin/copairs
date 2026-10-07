@@ -294,6 +294,8 @@ def map_pvalues(
         raise ValueError(
             "ptr must start at 0, end at len(conf_ix) and give every group a member"
         )
+    if len(thr) != len(ptr) - 1:
+        raise ValueError(f"{len(thr)} mAP scores but {len(ptr) - 1} groups in ptr")
     n_group = np.add.reduceat(conf_cnt, ptr[:-1]) if len(conf_cnt) else conf_cnt
     if len(thr) == 0:
         return np.zeros(0, dtype=np.float64)
