@@ -29,6 +29,10 @@ except ImportError:  # pragma: no cover - exercised only without numba
 # Use the guided gap search when the expected gap exceeds this many times the
 # number of remaining positives (its cost per probe); results are identical.
 GUIDED_RATIO = 32
+# Algorithm A's own rounding bound, (2g + 2) eps, widens the undecidable band as
+# gaps grow; from totals of ~1e8 the last probes all fall in it and replay
+# O(g) products, so the plain loop is faster there.
+GUIDED_MAX_TOTAL = 2**26
 # Bound on |log P(G > g) evaluated with log1p - log of Algorithm A's product|,
 # excluding the product's own rounding, when every factor is <= 1 - 2**-10.
 _LOG_MARGIN = 1e-9
@@ -139,7 +143,9 @@ def _make_ap_sample(philox, uniform, gap_loop, gap_guided):
                 gap = int(math.floor(remaining * u))
                 if gap > remaining - 1:
                     gap = remaining - 1
-            elif remaining - k > GUIDED_RATIO * k * (k + 1):
+            elif remaining < GUIDED_MAX_TOTAL and remaining - k > GUIDED_RATIO * k * (
+                k + 1
+            ):
                 gap = gap_guided(remaining, k, u)
             else:
                 gap = gap_loop(remaining, k, u)

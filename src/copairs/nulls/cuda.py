@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - exercised only without cupy
 # Constants shared with the CPU sampler, so both pick the same gap search.
 _DEFINES = (
     f"#define GUIDED_RATIO {sampler.GUIDED_RATIO}LL\n"
+    f"#define GUIDED_MAX_TOTAL {sampler.GUIDED_MAX_TOTAL}LL\n"
     f"#define LOG_MARGIN {sampler._LOG_MARGIN!r}\n"
     f"#define EPS {sampler._EPS!r}\n"
     f"#define FACTOR_LIMIT {sampler._FACTOR_LIMIT!r}\n"
@@ -159,7 +160,7 @@ __device__ double ap_sample(long long num_pos, long long total, unsigned long lo
         if (k == 1) {
             gap = (long long)floor((double)remaining * u);
             if (gap > remaining - 1) gap = remaining - 1;
-        } else if (remaining - k > GUIDED_RATIO * k * (k + 1)) {
+        } else if (remaining < GUIDED_MAX_TOTAL && remaining - k > GUIDED_RATIO * k * (k + 1)) {
             gap = gap_guided(remaining, k, u);
         } else {
             gap = gap_loop_f32(remaining, k, u);
