@@ -107,9 +107,10 @@ def expected_ap_array(M: np.ndarray, N: np.ndarray) -> np.ndarray:
     M = np.asarray(M, dtype=np.int64)
     N = np.asarray(N, dtype=np.int64)
     L = M + N
-    if (L < 1).any() or (M < 0).any() or (N < 0).any():
-        bad = np.flatnonzero((L < 1) | (M < 0) | (N < 0))[0]
-        raise ValueError(f"Invalid inputs: M={M[bad]}, N={N[bad]}")
+    bad = (L < 1) | (M < 0) | (N < 0)
+    if bad.any():
+        i = np.flatnonzero(bad)[0]
+        raise ValueError(f"Invalid inputs: M={M[i]}, N={N[i]}")
     (Mu, Lu), inv = np.unique(np.stack([M, L]), axis=1, return_inverse=True)
     if Lu.max() <= _MAX_TABLE:
         table = _harmonic_table(int(Lu.max()), sys.version_info >= (3, 12))
