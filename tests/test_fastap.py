@@ -175,6 +175,20 @@ def test_draw_average_precisions_validation():
         fastap.draw_average_precisions(feats, [[0, 1]], [[2, 3]], backend="numpy")
 
 
+@pytest.mark.skipif("cuda" not in BACKENDS, reason="needs a CUDA device")
+def test_draw_average_precisions_beyond_shared_memory():
+    """Draws with more queries than the CUDA kernel holds still get their APs."""
+    from copairs.fastap import cuda
+
+    k, m = cuda.MAX_DRAW_QUERIES + 1, 16
+    rng = np.random.default_rng(5)
+    feats = rng.normal(size=(k + m, 8)).astype(np.float32)
+    queries, refs = np.arange(k)[None], np.arange(k, k + m)[None]
+    got = fastap.draw_average_precisions(cuda.cp.asarray(feats), queries, refs)
+    expected = fastap.draw_average_precisions(feats, queries, refs, backend="numba")
+    np.testing.assert_array_equal(got, expected)
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_draw_average_precisions_nonfinite_normalized(backend):
     """Pre-normalized features are still checked: NaN would break the ranking."""

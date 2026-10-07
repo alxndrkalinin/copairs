@@ -178,6 +178,10 @@ def ap_from_pairs(pos_pairs, neg_pairs, pos_keys, neg_keys, n: int):
     return ap.get(), cp.diff(ptr).get(), n_neg.get().astype(np.int64)
 
 
+# draw_ap holds k float32 positives and k uint32 bins in shared memory, of
+# which a kernel gets 48 KiB without opting in.
+MAX_DRAW_QUERIES = 48 * 1024 // 8
+
 _DRAW_SOURCE = r"""
 // AP of each (draw, query) row of sims (n_rows, k + m); the first k columns are the
 // draw's queries (the row's own column is skipped), the rest its references.

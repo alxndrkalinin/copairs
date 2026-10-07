@@ -12,7 +12,7 @@ import numba
 import numpy as np
 
 from copairs.nulls import resolve_backend
-from copairs.fastap.ranking import array_module, ap_from_counts
+from copairs.fastap.ranking import _host, array_module, ap_from_counts
 
 DEFAULT_BUDGET = 2**29
 
@@ -87,7 +87,8 @@ def draw_average_precisions(
     references : array
         ``(n_draws, m)`` row indices of each draw's references.
     backend : str
-        ``"auto"``, ``"cuda"`` or ``"numba"``.
+        ``"auto"``, ``"cuda"`` or ``"numba"``. Draws with more than
+        :data:`copairs.fastap.cuda.MAX_DRAW_QUERIES` queries run on Numba.
     normalized : bool
         Whether ``feats`` rows already have unit norm (skips normalization;
         features are still checked to be finite).
@@ -113,9 +114,11 @@ def draw_average_precisions(
     if backend == "cuda":
         from copairs.fastap import cuda
 
-        return cuda.draw_average_precisions(
-            feats, queries, references, normalized, budget_bytes
-        )
+        if k <= cuda.MAX_DRAW_QUERIES:
+            return cuda.draw_average_precisions(
+                feats, queries, references, normalized, budget_bytes
+            )
+        feats = _host(feats)  # the kernel's shared memory holds no more queries
     x = unit_rows(feats, normalized)
     idx = np.concatenate([queries, references], axis=1)
     out = np.empty((n_draws, k), dtype=np.float64)
