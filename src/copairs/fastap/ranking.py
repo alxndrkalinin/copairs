@@ -63,6 +63,18 @@ def rank_keys(sims):
     return xp.float32(1) - xp.asarray(sims, dtype=xp.float32)
 
 
+@numba.njit(inline="always")
+def _rank_key(sim):
+    """:func:`rank_keys` of one similarity."""
+    return np.float32(1) - np.float32(sim)
+
+
+def index_pairs(pairs):
+    """Contiguous ``(n, 2)`` pairs for the kernels; uint32 pairs are not copied."""
+    pairs = np.ascontiguousarray(pairs).reshape(-1, 2)
+    return pairs if pairs.dtype == np.uint32 else pairs.astype(np.int64, copy=False)
+
+
 @numba.njit(cache=True)
 def pair_csr(pairs, keys, n):
     """Keys of each profile's pairs (both endpoints) in CSR layout, unsorted."""
@@ -107,7 +119,7 @@ def ap_from_counts(hist, base, num_pos):
 
 
 @numba.njit(parallel=True, cache=True)
-def _negative_hist(neg_pairs, neg_keys, ptr, vals, n, n_chunks):
+def _negative_hist(neg_pairs, neg_sims, ptr, vals, n, n_chunks):
     """Per-profile histograms of negatives over the gaps between positive keys.
 
     Bin ``ptr[i] + i + q`` counts the negatives of profile ``i`` whose key lies
@@ -120,7 +132,7 @@ def _negative_hist(neg_pairs, neg_keys, ptr, vals, n, n_chunks):
     step = (size + n_chunks - 1) // n_chunks
     for c in numba.prange(n_chunks):
         for p in range(c * step, min(size, (c + 1) * step)):
-            key = neg_keys[p]
+            key = _rank_key(neg_sims[p])
             for side in range(2):
                 i = neg_pairs[p, side]
                 hist[c, _upper_bound(vals, ptr[i], ptr[i + 1], key) + i] += 1
@@ -181,10 +193,6 @@ def ap_from_pairs(
     )
     if backend == "cuda" and n >= 2**32:
         backend = "numba"  # the GPU sort packs profile indices into 32 bits
-    if backend != "cuda":
-        pos_pairs = np.ascontiguousarray(pos_pairs, dtype=np.int64).reshape(-1, 2)
-        neg_pairs = np.ascontiguousarray(neg_pairs, dtype=np.int64).reshape(-1, 2)
-        pos_sims, neg_sims = _host(pos_sims), _host(neg_sims)
     if backend == "cuda":
         from copairs.fastap import cuda
 
@@ -192,12 +200,13 @@ def ap_from_pairs(
             pos_pairs, neg_pairs, rank_keys(pos_sims), neg_sims, n
         )
     else:
-        ptr, vals = _positive_csr(pos_pairs, rank_keys(pos_sims), n)
+        pos_pairs, neg_pairs = index_pairs(pos_pairs), index_pairs(neg_pairs)
+        ptr, vals = _positive_csr(pos_pairs, rank_keys(_host(pos_sims)), n)
         bins = int(ptr[n]) + n
         n_chunks = budget_bytes // (8 * (bins + n))
         n_chunks = max(1, min(numba.get_num_threads(), n_chunks))
         hist, n_neg = _negative_hist(
-            neg_pairs, rank_keys(neg_sims), ptr, vals, n, n_chunks
+            neg_pairs, _host(neg_sims), ptr, vals, n, n_chunks
         )
         ap = _ap_from_hist(ptr, hist, n)
         num_pos = np.diff(ptr)
