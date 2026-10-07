@@ -267,12 +267,14 @@ def test_cuda_unavailable_when_kernels_cannot_compile(monkeypatch):
 
 
 def _null_in_child():
-    return nulls.resolve_backend("auto"), nulls.ap_nulls(CONFS, 50, seed=4)
+    # NumPy sampling: Numba's GNU OpenMP layer, which earlier tests may have
+    # started, terminates forked children that run parallel kernels.
+    return nulls.resolve_backend("auto"), nulls.ap_nulls(CONFS, 50, 4, backend="numpy")
 
 
 @pytest.mark.skipif("cuda" not in BACKENDS, reason="needs a CUDA device")
 def test_forked_child_falls_back_to_cpu():
-    """A process forked after CUDA was initialised samples on the CPU."""
+    """A process forked after CUDA was initialised picks a CPU backend."""
     expected = nulls.ap_nulls(CONFS, 50, seed=4, backend="cuda")  # initialises CUDA
     with multiprocessing.get_context("fork").Pool(1) as pool:
         backend, null = pool.apply_async(_null_in_child).get(timeout=300)
