@@ -30,11 +30,9 @@ def label_frame(seed=0, n=120, empty=True):
     )
 
 
-def sql_pairs(monkeypatch, *args):
+def sql_pairs(*args):
     """find_pairs_multilabel through the DuckDB implementation."""
-    with monkeypatch.context() as m:
-        m.setattr(matching, "_find_pairs_multilabel_fast", lambda *a: None)
-        return matching.find_pairs_multilabel(*args)
+    return matching.find_pairs_multilabel(*args, method="legacy")
 
 
 def as_set(pairs):
@@ -46,13 +44,13 @@ def as_set(pairs):
     "sameby,diffby",
     [(["labels"], []), (["labels", "plate"], []), (["labels"], ["well"])],
 )
-def test_shared_label_pairs_match_sql(monkeypatch, sameby, diffby):
+def test_shared_label_pairs_match_sql(sameby, diffby):
     """Pairs sharing a label, and per-label counts, equal the SQL result."""
     dframe = label_frame()
     args = (dframe, sameby, diffby, "labels")
     assert matching._find_pairs_multilabel_fast(*args) is not None
     pairs, keys, counts = matching.find_pairs_multilabel(*args)
-    sql_pairs_, sql_keys, sql_counts = sql_pairs(monkeypatch, *args)
+    sql_pairs_, sql_keys, sql_counts = sql_pairs(*args)
     np.testing.assert_array_equal(keys, sql_keys)
     np.testing.assert_array_equal(counts, sql_counts)
     start = 0
@@ -68,13 +66,13 @@ def test_shared_label_pairs_match_sql(monkeypatch, sameby, diffby):
     "sameby,diffby",
     [([], ["labels"]), (["plate"], ["labels"]), ([], ["labels", "well"])],
 )
-def test_disjoint_label_pairs_match_sql(monkeypatch, sameby, diffby):
+def test_disjoint_label_pairs_match_sql(sameby, diffby):
     """Pairs sharing no label equal the SQL result, sorted and unique."""
     dframe = label_frame(1)
     args = (dframe, sameby, diffby, "labels")
     assert matching._find_pairs_multilabel_fast(*args) is not None
     pairs = matching.find_pairs_multilabel(*args)
-    assert as_set(pairs) == as_set(sql_pairs(monkeypatch, *args))
+    assert as_set(pairs) == as_set(sql_pairs(*args))
     keys = pairs[:, 0].astype(np.int64) * len(dframe) + pairs[:, 1]
     assert (np.diff(keys) > 0).all() and (pairs[:, 0] < pairs[:, 1]).all()
 
@@ -129,11 +127,11 @@ def test_multilabel_ap_matches_legacy(backend):
         np.testing.assert_allclose(fast[col], legacy[col], rtol=1e-12, atol=1e-15)
 
 
-def test_numeric_label_keys(monkeypatch):
+def test_numeric_label_keys():
     """Integer labels give integer keys, equal to the SQL path's."""
     dframe = pd.DataFrame({"labels": [[1, 2], [2], [1, 3], [3]]})
     _, keys, counts = matching.find_pairs_multilabel(dframe, ["labels"], [], "labels")
-    _, sql_keys, sql_counts = sql_pairs(monkeypatch, dframe, ["labels"], [], "labels")
+    _, sql_keys, sql_counts = sql_pairs(dframe, ["labels"], [], "labels")
     assert np.issubdtype(keys.dtype, np.integer)
     np.testing.assert_array_equal(keys, sql_keys)
     np.testing.assert_array_equal(counts, sql_counts)

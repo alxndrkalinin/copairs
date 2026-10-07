@@ -108,14 +108,22 @@ def average_precision(
 
     logger.info("Finding positive pairs...")
     pos_pairs, keys, pos_counts = find_pairs_multilabel(
-        meta, sameby=pos_sameby, diffby=pos_diffby, multilabel_col=multilabel_col
+        meta,
+        sameby=pos_sameby,
+        diffby=pos_diffby,
+        multilabel_col=multilabel_col,
+        method=method,
     )
     if len(pos_pairs) == 0:
         raise UnpairedException("Unable to find positive pairs.")
 
     logger.info("Finding negative pairs...")
     neg_pairs = find_pairs_multilabel(
-        meta, sameby=neg_sameby, diffby=neg_diffby, multilabel_col=multilabel_col
+        meta,
+        sameby=neg_sameby,
+        diffby=neg_diffby,
+        multilabel_col=multilabel_col,
+        method=method,
     )
     if len(neg_pairs) == 0:
         raise UnpairedException("Unable to find any negative pairs.")

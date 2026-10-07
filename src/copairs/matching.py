@@ -569,6 +569,7 @@ def find_pairs_multilabel(
     sameby: Union[str, ColumnList],
     diffby: Union[str, ColumnList],
     multilabel_col: str,
+    method: str = "fast",
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
     Find pairs of rows in a DataFrame that have the same or different values in certain columns.
@@ -585,6 +586,10 @@ def find_pairs_multilabel(
         List of column names to consider for finding different values.
     multilabel_col : str
         Name of the column containing multiple labels.
+    method : str
+        ``"fast"`` (default) matches through an inverted label index when the
+        input allows it, falling back to SQL otherwise; ``"legacy"`` always uses
+        the SQL implementation of copairs <= 0.5.5. Both return the same pairs.
 
     Returns
     -------
@@ -611,9 +616,12 @@ def find_pairs_multilabel(
         labels = _as_label_lists(dframe[multilabel_col])
         dframe = dframe.assign(**{multilabel_col: labels})
 
-    fast = _find_pairs_multilabel_fast(dframe, sameby, diffby, multilabel_col)
-    if fast is not None:
-        return fast
+    if method not in ("fast", "legacy"):
+        raise ValueError(f"unknown method {method!r}; expected fast or legacy")
+    if method == "fast":
+        fast = _find_pairs_multilabel_fast(dframe, sameby, diffby, multilabel_col)
+        if fast is not None:
+            return fast
 
     df = dframe.reset_index()
 
