@@ -3,6 +3,7 @@
 import numpy as np
 
 from copairs.nulls import cuda as _null_cuda
+from copairs.fastap.draws import _chunk, unit_rows
 from copairs.fastap.ranking import sortable_keys
 from copairs.fastap.similarity import PAIR_CHUNK
 
@@ -228,8 +229,6 @@ extern "C" __global__ void draw_ap(const float* sims, int k, int m, long long n_
 
 def draw_average_precisions(feats, queries, references, normalized, budget_bytes):
     """CUDA backend of :func:`copairs.fastap.draws.draw_average_precisions`."""
-    from copairs.fastap.draws import _chunk, unit_rows
-
     x = (
         cp.asarray(feats, dtype=cp.float32)
         if normalized
