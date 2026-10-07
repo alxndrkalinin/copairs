@@ -155,8 +155,8 @@ def average_precision(
         copairs <= 0.5.5.
 
     backend : str
-        ``"auto"``, ``"cuda"``, ``"numba"``, or ``"numpy"`` (the legacy NumPy
-        implementation) for the fast method.
+        ``"auto"``, ``"cuda"`` or ``"numba"`` for the fast method (the NumPy
+        implementation is ``method="legacy"``).
 
     Returns
     -------

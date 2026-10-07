@@ -113,7 +113,7 @@ def test_average_precision_fast_ap_stage(backend):
         np.testing.assert_allclose(fast[col], legacy[col], rtol=1e-12, atol=1e-15)
 
 
-@pytest.mark.parametrize("backend", BACKENDS + ["numpy"])
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_average_precision_fast_similarity(backend):
     """Fast kernels give the legacy APs up to float32 near-ties."""
     meta, feats = simulated_pipeline_input(1)
@@ -186,3 +186,10 @@ def test_pair_similarity_nonfinite_features(backend, metric):
     got = fastap.pair_similarity(feats, metric, backend)(pairs)
     np.testing.assert_array_equal(np.isnan(got), np.isnan(generic))
     np.testing.assert_allclose(got, generic, rtol=1e-6)
+
+
+def test_average_precision_rejects_numpy_backend():
+    """The fast AP stage has no NumPy backend; the NumPy code is method="legacy"."""
+    meta, feats = simulated_pipeline_input()
+    with pytest.raises(ValueError, match="method='legacy'"):
+        average_precision(meta, feats, backend="numpy", **PIPELINE, progress_bar=False)
