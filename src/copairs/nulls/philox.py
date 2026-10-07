@@ -47,25 +47,12 @@ def uniform53(a, b):
     return (((a >> np.uint64(5)) << np.uint64(26)) | (b >> np.uint64(6))) * INV_2_53
 
 
-def config_key(seed: int, num_pos: int, total: int) -> tuple[int, int]:
-    """Derive the Philox key of one ``(num_pos, total)`` null configuration.
+def config_key_arrays(seed: int, num_pos: np.ndarray, total: np.ndarray):
+    """Philox keys ``(k0, k1)`` of each ``(num_pos, total)`` null configuration.
 
-    The key depends only on ``(seed, num_pos, total)``, so a configuration's null
+    A key depends only on ``(seed, num_pos, total)``, so a configuration's null
     is the same whichever other configurations are computed alongside it.
     """
-    if not 0 <= seed < 2**64:
-        raise ValueError(f"seed must be in [0, 2**64), got {seed}")
-    if not (0 <= num_pos < 2**32 and 0 <= total < 2**32):
-        raise ValueError(f"num_pos and total must be < 2**32, got {num_pos}, {total}")
-    u = np.uint64
-    w = philox4x32(
-        u(num_pos), u(total), u(seed & 0xFFFFFFFF), u(seed >> 32), SALT0, SALT1
-    )
-    return int(w[0]), int(w[1])
-
-
-def config_key_arrays(seed: int, num_pos: np.ndarray, total: np.ndarray):
-    """Vectorized :func:`config_key`: ``(k0, k1)`` arrays for many configurations."""
     if not 0 <= seed < 2**64:
         raise ValueError(f"seed must be in [0, 2**64), got {seed}")
     num_pos, total = np.asarray(num_pos), np.asarray(total)

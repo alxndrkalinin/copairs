@@ -305,6 +305,20 @@ def test_forked_child_falls_back_to_cpu():
     np.testing.assert_array_equal(null, expected)
 
 
+def scalar_config_key(seed, num_pos, total):
+    """Philox key of one configuration, one block at a time."""
+    u = np.uint64
+    w = philox.philox4x32(
+        u(num_pos),
+        u(total),
+        u(seed & 0xFFFFFFFF),
+        u(seed >> 32),
+        philox.SALT0,
+        philox.SALT1,
+    )
+    return int(w[0]), int(w[1])
+
+
 @pytest.mark.parametrize("seed", [0, 3, 2**33 + 7, 2**64 - 1])
 def test_config_key_arrays_match_scalar(seed):
     """Vectorized configuration keys equal the scalar derivation."""
@@ -312,10 +326,19 @@ def test_config_key_arrays_match_scalar(seed):
     num_pos = rng.integers(1, 2**32 - 1, 500)
     total = rng.integers(1, 2**32 - 1, 500)
     k0, k1 = philox.config_key_arrays(seed, num_pos, total)
-    expected = [philox.config_key(seed, int(p), int(t)) for p, t in zip(num_pos, total)]
+    expected = [scalar_config_key(seed, int(p), int(t)) for p, t in zip(num_pos, total)]
     np.testing.assert_array_equal(
         np.stack([k0, k1], axis=1), np.array(expected, dtype=np.uint64)
     )
+
+
+@pytest.mark.parametrize("seed", [-1, 2**64])
+def test_seed_out_of_range(seed):
+    """Seeds outside [0, 2**64) raise, whether or not the caller resolves them."""
+    with pytest.raises(ValueError, match="seed must be"):
+        nulls.ap_nulls(CONFS, 4, seed)
+    with pytest.raises(ValueError, match="seed must be"):
+        nulls.ap_pvalues([0.5], [0], CONFS, 4, seed)
 
 
 @pytest.mark.parametrize("null_size", [-1, -100, 2.5])

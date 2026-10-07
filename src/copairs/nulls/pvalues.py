@@ -42,13 +42,13 @@ def tie_thresholds(scores) -> np.ndarray:
 
 
 def resolve_seed(seed: int | None) -> int:
-    """Return ``seed``, or fresh OS entropy when it is ``None``."""
+    """Return ``seed`` as an int, or fresh OS entropy when it is ``None``.
+
+    The range is checked where the seed is used, by the null plan.
+    """
     if seed is None:
         return int(np.random.SeedSequence().entropy % 2**64)
-    seed = int(seed)
-    if not 0 <= seed < 2**64:
-        raise ValueError(f"seed must be in [0, 2**64), got {seed}")
-    return seed
+    return int(seed)
 
 
 def _check_null_size(null_size: int) -> int:
