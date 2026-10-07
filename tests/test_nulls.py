@@ -233,3 +233,23 @@ def test_map_pvalues_validates_groups(ptr):
         nulls.map_pvalues(
             [0.1] * (len(ptr) - 1), ptr, [0, 1], [1, 1], CONFS[:2], 10, seed=1
         )
+
+
+def test_cuda_unavailable_when_kernels_cannot_compile(monkeypatch):
+    """A visible GPU whose kernels fail to compile is not offered as a backend."""
+    from copairs.nulls import cuda
+
+    if cuda.cp is None:
+        pytest.skip("CuPy not installed")
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("NVRTC not found")
+
+    monkeypatch.setattr(cuda.cp, "RawKernel", broken)
+    cuda.is_available.cache_clear()
+    try:
+        assert not cuda.is_available()
+        assert "cuda" not in nulls.available_backends()
+    finally:
+        monkeypatch.undo()
+        cuda.is_available.cache_clear()

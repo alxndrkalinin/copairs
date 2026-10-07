@@ -213,16 +213,24 @@ _OPTIONS = ("--fmad=false", "-std=c++14")
 _BLOCK = 256
 
 
+_PROBE = 'extern "C" __global__ void probe(int* x) { if (x) *x = 1; }'
+
+
+@functools.cache
 def is_available() -> bool:
-    """Whether CuPy is installed and sees at least one CUDA device."""
+    """Whether CuPy sees a CUDA device and can compile kernels for it (cached)."""
     if cp is None:
         return False
     try:
-        return cp.cuda.runtime.getDeviceCount() > 0
-    except RuntimeError:
-        # CUDARuntimeError (no device, insufficient driver) or a CUDA runtime
-        # library that fails to load: either way there is no usable GPU.
+        if cp.cuda.runtime.getDeviceCount() == 0:
+            return False
+        # A visible GPU is not enough: without NVRTC (e.g. CuPy without its
+        # [ctk] extra or a CUDA Toolkit) every kernel fails to compile.
+        cp.RawKernel(_PROBE, "probe", options=_OPTIONS).compile()
+    except (RuntimeError, ImportError, OSError, cp.cuda.compiler.CompileException):
+        # No device, an insufficient driver, or CUDA libraries that fail to load.
         return False
+    return True
 
 
 @functools.cache
