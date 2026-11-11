@@ -32,7 +32,7 @@ def profiles():
 
 @pytest.mark.parametrize("null", ["joint", "permutation", "copied"])
 @pytest.mark.parametrize("hierarchical", [False, True])
-def test_zero_draws_are_untested(null, hierarchical, monkeypatch, tmp_path):
+def test_zero_draws_are_untested(null, hierarchical, monkeypatch):
     """Zero draws keep scores but do not sample or run a correction."""
     ap, _ = profiles()
     module = importlib.import_module("copairs.map.map")
@@ -57,7 +57,6 @@ def test_zero_draws_are_untested(null, hierarchical, monkeypatch, tmp_path):
         0.05,
         null=null,
         progress_bar=False,
-        cache_dir=tmp_path,
         **extra,
     )
     assert out.mean_average_precision.notna().all()
@@ -201,8 +200,8 @@ def test_correction_keeps_untested_rows_missing(hierarchical):
 
 
 @pytest.mark.parametrize("null", ["joint", "permutation", "copied"])
-def test_none_seed_resolves_entropy_once(null, monkeypatch, tmp_path):
-    """Each run resolves one seed before dispatch; None never fills the copied cache."""
+def test_none_seed_resolves_entropy_once(null, monkeypatch):
+    """Each run resolves one seed before dispatch."""
     ap, _ = profiles()
     original = np.random.SeedSequence
     fresh = []
@@ -214,19 +213,18 @@ def test_none_seed_resolves_entropy_once(null, monkeypatch, tmp_path):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(np.random, "SeedSequence", sequence)
-    kwargs = dict(null=null, progress_bar=False, cache_dir=tmp_path, max_workers=2)
+    kwargs = dict(null=null, progress_bar=False, max_workers=2)
     got = get_map_pvalue(ap, ["g"], 30, seed=None, **kwargs)
     assert len(fresh) == 1
-    assert not list(tmp_path.rglob("*.npy"))
     expected = get_map_pvalue(ap, ["g"], 30, seed=17, **kwargs)
     pd.testing.assert_frame_equal(got, expected)
 
 
 @pytest.mark.parametrize("null", ["joint", "permutation", "copied"])
-def test_public_entry_points_default_seed_zero(null, tmp_path):
+def test_public_entry_points_default_seed_zero(null):
     """All public mAP entry points have the same explicit/implicit seed semantics."""
     ap, _ = profiles()
-    kwargs = dict(null=null, progress_bar=False, cache_dir=tmp_path)
+    kwargs = dict(null=null, progress_bar=False)
     for fn, args, extra in (
         (get_map_pvalue, (ap, ["g"], 20), {}),
         (mean_average_precision, (ap, ["g"], 20, 0.05), {}),

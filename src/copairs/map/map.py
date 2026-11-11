@@ -1,17 +1,14 @@
 """Functions to compute mean average precision."""
 
 import logging
-from os import cpu_count
-from typing import List, Union, Optional
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
 
-from copairs import nulls, compute
+from copairs import nulls
 from copairs.nulls import joint, permutation
-from copairs.methods import check_null, check_method
+from copairs.methods import check_null
 from copairs.matching import UnpairedException
 from copairs.nulls.common import (
     check_seed,
@@ -19,6 +16,7 @@ from copairs.nulls.common import (
     check_null_size,
     check_max_workers,
 )
+from copairs.nulls.backend import check_backend
 from copairs.map.hierarchical_fdr import (
     check_group_columns,
     apply_fdr_correction,
@@ -40,12 +38,10 @@ def get_map_pvalue(
     seed: int | None = 0,
     progress_bar: bool = True,
     max_workers: Optional[int] = None,
-    cache_dir: Optional[Union[str, Path]] = None,
     pos_pairs: Optional[np.ndarray] = None,
     null: str = "permutation",
     pairs: dict | None = None,
     *,
-    method: str = "fast",
     backend: str = "auto",
     max_reference_profiles: int = 16_384,
     pool_memory_budget: int = 4 * 1024**3,
@@ -55,11 +51,10 @@ def get_map_pvalue(
 
     This function groups AP scores by the specified columns, computes the mean
     Average Precision (mAP) for each group, and calculates p-values by comparing
-    against the null distribution of the group's mAP chosen by `null`. Under
-    ``method="fast"`` a null mAP counts against the group when it is ``>=``
-    the group's mAP, so an mAP equal to an atom of the null (e.g. perfect
-    retrieval) counts the atom; values within the scores' rounding count as
-    ties (`copairs.nulls.tie_thresholds`).
+    against the null distribution of the group's mAP chosen by `null`. A null
+    mAP counts against the group when it is ``>=`` the group's mAP, so an mAP
+    equal to an atom of the null (e.g. perfect retrieval) counts the atom; values
+    within the scores' rounding count as ties (`copairs.nulls.tie_thresholds`).
 
     Parameters
     ----------
@@ -72,23 +67,19 @@ def get_map_pvalue(
         Number of Monte Carlo draws. Zero requests scores only: p-values are NaN
         after input/layout validation, without sampling or null-only tables.
     seed : int or None, default 0
-        Reproducible seed; None resolves fresh entropy once per run. Joint and
-        permutation accept integers in [0, 2**64); copied accepts any integer >= 0.
+        Reproducible seed, an integer in [0, 2**64); None resolves fresh
+        entropy once per run.
     progress_bar : bool
         Whether or not to show tqdm's progress bar.
     max_workers : int
-        Threads that run the permutation null's draws or the fast copied
-        null's NumPy backend (default: the CPUs this process may run on, at
-        most 32 for the permutation null, which under Numba runs one per
-        Numba thread), or that compute the legacy copied null's p-values
-        (default: tqdm's `thread_map`'s). Numba's kernels run on Numba's
-        threads (``NUMBA_NUM_THREADS`` or ``numba.set_num_threads``), except
-        that the permutation null's threads run the draws themselves, sharing
-        a large group's, when they run as many groups at once as Numba has
-        threads. P-values do not depend on the threads.
-    cache_dir : str or Path
-        Location to save the cache of the copied null's AP samples
-        (``method="legacy"`` only).
+        Threads that run the permutation null's draws or the copied null's
+        NumPy sampler (default: the CPUs this process may run on, at most 32
+        for the permutation null, which under Numba runs one per Numba
+        thread). Numba's kernels run on Numba's threads (``NUMBA_NUM_THREADS``
+        or ``numba.set_num_threads``), except that the permutation null's
+        threads run the draws themselves, sharing a large group's, when they
+        run as many groups at once as Numba has threads. P-values do not
+        depend on the threads.
     pos_pairs : np.ndarray, optional
         The `(n_pairs, 2)` positive pairs used to compute the AP scores,
         indexing the rows of the frame `average_precision` returned (its
@@ -122,8 +113,8 @@ def get_map_pvalue(
         and other similarities are independent, which real profiles are not
         (members share references, and some profiles are close to many
         others), so it can give too small p-values for groups of many
-        replicates. ``"copied"`` (the only null of ``method="legacy"``) samples
-        each member's AP null per `(n_pos_pairs, n_total_pairs)`
+        replicates. ``"copied"`` samples each member's AP null per
+        `(n_pos_pairs, n_total_pairs)`
         configuration and the group's null averages them, so members with
         equal pair counts share one draw and the null does not narrow as
         replicates are added.
@@ -146,6 +137,16 @@ def get_map_pvalue(
         group members. Copies share the dictionary, features and arrays; keep
         them unchanged between AP and mAP. Custom similarities must return the
         same value for a pair regardless of batch size or contents.
+    backend : str
+        Backend of the nulls: ``"auto"`` (default), ``"numba"`` or
+        ``"numpy"``. ``"numba"`` compiles the scalar functions that define
+        each null's draws (the copied null's AP samples, which it samples
+        exactly and streams in bounded memory without a cache, see
+        :func:`copairs.nulls.map_pvalues`; the joint null's samples; the
+        permutation null's relabellings, or label moves on multilabel APs,
+        and their mAPs), and ``"numpy"`` computes the same draws vectorized.
+        The two give bitwise-identical draws and p-values, so ``"auto"``
+        picks Numba when it imports (:func:`copairs.nulls.resolve_backend`).
     max_reference_profiles : int, default 16384
         Maximum total reference profiles across a tested group's blocks; >= 0.
         For multilabel groups, component-union size minus its members; all
@@ -157,26 +158,6 @@ def get_map_pvalue(
     key_table_memory_budget : int, default 268435456
         Byte limit for optional cross-pool key reuse; zero disables it.
         Neither budget includes features, layouts or all temporary arrays.
-    method : str
-        ``"fast"`` (default) offers every null and counts ties as above; its
-        copied null samples the members' AP nulls exactly and streams them in
-        bounded memory, without a cache (:func:`copairs.nulls.map_pvalues`).
-        ``"legacy"`` reproduces copairs <= 0.5.5, with each configuration's
-        null seeded by its pair counts: ``null="copied"`` only, averaging the
-        cached nulls of :func:`copairs.compute.get_null_dists` and counting
-        group nulls ``> mAP``, which gives too small p-values when the mAP
-        equals an atom of the null (e.g. perfect retrieval). Other nulls
-        raise under it.
-    backend : str
-        Backend of the fast method's nulls: ``"auto"`` (default), ``"numba"``
-        or ``"numpy"``. ``"numba"`` compiles the scalar functions that define
-        each null's draws (the copied null's AP samples, the joint null's
-        samples, the permutation null's relabellings, or label moves on
-        multilabel APs, and their mAPs), and ``"numpy"`` computes the same
-        draws vectorized. The two give
-        bitwise-identical draws and p-values, so ``"auto"`` picks Numba
-        when it imports (:func:`copairs.nulls.resolve_backend`). Ignored by
-        ``method="legacy"``.
 
     Returns
     -------
@@ -200,8 +181,8 @@ def get_map_pvalue(
         and joint sampling, which does not use that executor.
 
     """
-    check_method(method, backend)
-    null = check_null(null, method)
+    null = check_null(null)
+    check_backend(backend)
     null_size = check_null_size(null_size)
     sameby = check_group_columns(sameby, "sameby", ap_scores)
     max_workers = check_max_workers(max_workers)
@@ -213,11 +194,8 @@ def get_map_pvalue(
             ),
         )
     )
-    if method == "fast":  # Philox seeds; a missing Numba raises before any work
-        check_seed(seed)
-        backend = nulls.resolve_backend(backend)
-    elif seed is not None and (int(seed) != seed or seed < 0):  # NumPy: any int >= 0
-        raise ValueError(f"seed must be a non-negative integer, got {seed}")
+    check_seed(seed)
+    backend = nulls.resolve_backend(backend)  # a missing Numba raises before any work
     if null != "joint" and pos_pairs is not None:
         raise ValueError("pos_pairs is used by the joint null only")
     if null != "copied" and pairs is None:
@@ -319,10 +297,8 @@ def get_map_pvalue(
     copied = dict(
         null_size=null_size,
         seed=seed,
-        cache_dir=cache_dir,
         progress_bar=progress_bar,
         max_workers=max_workers,
-        method=method,
         backend=backend,
     )
 
@@ -423,23 +399,14 @@ def _check_row_index(index: pd.Index) -> None:
 
 
 def _copied_pvalues(
-    scores,
-    groups,
-    ap_scores,
-    null_size,
-    seed,
-    cache_dir,
-    progress_bar,
-    max_workers,
-    method,
-    backend,
+    scores, groups, ap_scores, null_size, seed, progress_bar, max_workers, backend
 ):
     """P-values against the mean of the members' AP nulls, as in copairs <= 0.5.5.
 
     ``groups`` lists each group's rows of ``ap_scores``; members with equal pair
-    counts share null samples. ``method="fast"`` streams the exact nulls of
-    :func:`nulls.map_pvalues` and counts ties; ``"legacy"`` averages the nulls
-    of :func:`compute.get_null_dists` and counts null mAPs ``>`` the score.
+    counts share null samples. The exact nulls of :func:`nulls.map_pvalues`
+    are streamed, and null mAPs count when ``>=`` the score, within the
+    scores' rounding (:func:`nulls.tie_thresholds`).
     """
     members = np.concatenate(groups).astype(np.int64)
     rows = np.unique(members)
@@ -448,53 +415,24 @@ def _copied_pvalues(
     rev_ix = np.full(len(ap_scores), -1, dtype=np.int64)
     rev_ix[rows] = conf_ix.ravel()
 
-    if method == "fast":
-        logger.info("Computing p-values...")
-        gid = np.repeat(np.arange(len(groups)), [len(ix) for ix in groups])
-        keys, conf_cnt = np.unique(
-            gid * len(null_confs) + rev_ix[members], return_counts=True
-        )
-        ptr = np.searchsorted(keys // len(null_confs), np.arange(len(groups) + 1))
-        return nulls.map_pvalues(
-            scores,
-            ptr,
-            keys % len(null_confs),
-            conf_cnt,
-            null_confs,
-            null_size,
-            seed,
-            backend=backend,
-            progress_bar=progress_bar,
-            max_workers=max_workers,
-        )
-
-    logger.info("Computing null_dist...")
-    null_dists = compute.get_null_dists(
+    logger.info("Computing p-values...")
+    gid = np.repeat(np.arange(len(groups)), [len(ix) for ix in groups])
+    keys, conf_cnt = np.unique(
+        gid * len(null_confs) + rev_ix[members], return_counts=True
+    )
+    ptr = np.searchsorted(keys // len(null_confs), np.arange(len(groups) + 1))
+    return nulls.map_pvalues(
+        scores,
+        ptr,
+        keys % len(null_confs),
+        conf_cnt,
         null_confs,
         null_size,
-        seed=seed,
-        cache_dir=cache_dir,
+        seed,
+        backend=backend,
         progress_bar=progress_bar,
-        method="legacy",
+        max_workers=max_workers,
     )
-
-    def get_p_value(k):
-        null_dist = null_dists[rev_ix[groups[k]]].mean(axis=0)
-        # A Python float, as copairs 0.5.5 compared: float32 nulls stay float32.
-        num = (null_dist > float(scores[k])).sum()
-        return (num + 1) / (null_size + 1)  # Add 1 for stability
-
-    logger.info("Computing p-values...")
-    return _thread_map(get_p_value, range(len(groups)), progress_bar, max_workers)
-
-
-def _thread_map(fn, items, progress_bar, max_workers):
-    """``[fn(item) for item in items]`` on a thread pool."""
-    if progress_bar:
-        from tqdm.contrib.concurrent import thread_map
-
-        return thread_map(fn, items, leave=False, max_workers=max_workers)
-    return silent_thread_map(fn, items, max_workers=max_workers)
 
 
 def mean_average_precision(
@@ -505,12 +443,10 @@ def mean_average_precision(
     seed: int | None = 0,
     progress_bar: bool = True,
     max_workers: Optional[int] = None,
-    cache_dir: Optional[Union[str, Path]] = None,
     pos_pairs: Optional[np.ndarray] = None,
     null: str = "permutation",
     pairs: dict | None = None,
     *,
-    method: str = "fast",
     backend: str = "auto",
     max_reference_profiles: int = 16_384,
     pool_memory_budget: int = 4 * 1024**3,
@@ -544,10 +480,8 @@ def mean_average_precision(
     progress_bar : bool
         Whether or not to show tqdm's progress bar.
     max_workers : int
-        Number of threads, see `get_map_pvalue`.
-    cache_dir : str or Path
-        Location to save the cache of the copied null's AP samples
-        (``method="legacy"`` only).
+        Threads that run the permutation null's draws or the copied null's
+        NumPy sampler; see `get_map_pvalue`.
     pos_pairs : np.ndarray, optional
         Positive pairs used to compute the AP scores, for ``null="joint"``;
         see `get_map_pvalue`. Needed there when a group's positives are not
@@ -558,10 +492,8 @@ def mean_average_precision(
     pairs : dict, optional
         Pair dictionary of the AP scores, needed by ``null="permutation"`` and
         attached to AP frames; see `get_map_pvalue`.
-    method : str
-        ``"fast"`` (default) or ``"legacy"``, see `get_map_pvalue`.
     backend : str
-        Backend of the fast method's nulls, see `get_map_pvalue`.
+        Backend of the nulls, see `get_map_pvalue`.
 
     Returns
     -------
@@ -593,15 +525,13 @@ def mean_average_precision(
         seed=seed,
         progress_bar=progress_bar,
         max_workers=max_workers,
-        cache_dir=cache_dir,
-        method=method,
-        backend=backend,
         pos_pairs=pos_pairs,
         null=null,
         pairs=pairs,
         max_reference_profiles=max_reference_profiles,
         pool_memory_budget=pool_memory_budget,
         key_table_memory_budget=key_table_memory_budget,
+        backend=backend,
     )
 
     if null_size == 0:
@@ -620,12 +550,10 @@ def mean_average_precision_hierarchical(
     hierarchical_by: Optional[List[str]] = None,
     progress_bar: bool = True,
     max_workers: Optional[int] = None,
-    cache_dir: Optional[Union[str, Path]] = None,
     pos_pairs: Optional[np.ndarray] = None,
     null: str = "permutation",
     pairs: dict | None = None,
     *,
-    method: str = "fast",
     backend: str = "auto",
     max_reference_profiles: int = 16_384,
     pool_memory_budget: int = 4 * 1024**3,
@@ -673,10 +601,8 @@ def mean_average_precision_hierarchical(
     progress_bar : bool
         Whether or not to show tqdm's progress bar.
     max_workers : int
-        Number of threads, see `get_map_pvalue`.
-    cache_dir : str or Path
-        Location to save the cache of the copied null's AP samples
-        (``method="legacy"`` only).
+        Threads that run the permutation null's draws or the copied null's
+        NumPy sampler; see `get_map_pvalue`.
     pos_pairs : np.ndarray, optional
         Positive pairs used to compute the AP scores, for ``null="joint"``;
         see `get_map_pvalue`. Needed there when a group's positives are not
@@ -687,10 +613,8 @@ def mean_average_precision_hierarchical(
     pairs : dict, optional
         Pair dictionary of the AP scores, needed by ``null="permutation"`` and
         attached to AP frames; see `get_map_pvalue`.
-    method : str
-        ``"fast"`` (default) or ``"legacy"``, see `get_map_pvalue`.
     backend : str
-        Backend of the fast method's nulls, see `get_map_pvalue`.
+        Backend of the nulls, see `get_map_pvalue`.
 
     Returns
     -------
@@ -730,15 +654,13 @@ def mean_average_precision_hierarchical(
         seed=seed,
         progress_bar=progress_bar,
         max_workers=max_workers,
-        cache_dir=cache_dir,
-        method=method,
-        backend=backend,
         pos_pairs=pos_pairs,
         null=null,
         pairs=pairs,
         max_reference_profiles=max_reference_profiles,
         pool_memory_budget=pool_memory_budget,
         key_table_memory_budget=key_table_memory_budget,
+        backend=backend,
     )
 
     if null_size == 0:
@@ -769,29 +691,3 @@ def _mark_significance(map_scores, threshold):
             significant = significant.astype("boolean").mask(map_scores[score].isna())
         map_scores[flag] = significant
     return map_scores
-
-
-def silent_thread_map(fn, *iterables, **kwargs):
-    """Map iterables and kwargs to a function.
-
-    Parameters
-    ----------
-    fn : callable
-        Function to map over iterables.
-    *iterables : tuple
-        Iterables to map over.
-    **kwargs : dict
-        Additional keyword arguments. Accepts:
-        - max_workers : int, optional
-            Maximum number of workers [default: min(32, cpu_count() + 4)].
-        - chunksize : int, optional
-            Size of chunks for each worker [default: 1].
-    """
-    # Based on tqdm's original implementation for consistency
-    # (github.com/tqdm/tqdm/blob/0ed5d7f18fa3153834cbac0aa57e8092b217cc16/tqdm/contrib/concurrent.py#L29).
-
-    kwargs = kwargs.copy()
-    max_workers = kwargs.pop("max_workers", min(32, (cpu_count() or 1) + 4))
-    chunksize = kwargs.pop("chunksize", 1)
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        return list(ex.map(fn, *iterables, chunksize=chunksize, **kwargs))

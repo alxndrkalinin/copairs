@@ -20,7 +20,7 @@ from copairs.map.hierarchical_fdr import (
 )
 
 
-def run_map(ap_scores, hierarchical, cache_dir):
+def run_map(ap_scores, hierarchical):
     """Run mAP per compound and dose, with or without hierarchical FDR."""
     kwargs = dict(
         sameby=["compound", "dose"],
@@ -28,7 +28,6 @@ def run_map(ap_scores, hierarchical, cache_dir):
         threshold=0.05,
         seed=42,
         progress_bar=False,
-        cache_dir=cache_dir,
         null="copied",  # a mock AP table has no pairs to permute
     )
     if hierarchical:
@@ -212,24 +211,20 @@ class TestHierarchicalFDR:
         ],
         ids=["nan_ap", "no_positives", "no_rows"],
     )
-    def test_no_valid_ap_scores(
-        self, sample_ap_scores, tmp_path, invalidate, hierarchical
-    ):
+    def test_no_valid_ap_scores(self, sample_ap_scores, invalidate, hierarchical):
         """No valid AP scores raise UnpairedException in both mAP entry points."""
         with pytest.raises(UnpairedException, match="valid AP scores"):
-            run_map(invalidate(sample_ap_scores), hierarchical, tmp_path)
+            run_map(invalidate(sample_ap_scores), hierarchical)
 
     @pytest.mark.parametrize("hierarchical", [False, True])
     @pytest.mark.parametrize(
         "column, value", [("average_precision", np.nan), ("n_pos_pairs", 0)]
     )
-    def test_one_valid_ap_score(
-        self, sample_ap_scores, tmp_path, column, value, hierarchical
-    ):
+    def test_one_valid_ap_score(self, sample_ap_scores, column, value, hierarchical):
         """One valid AP score among invalid ones still gives its group's mAP."""
         ap_scores = sample_ap_scores.copy()
         ap_scores.loc[ap_scores.index[1:], column] = value
-        result = run_map(ap_scores, hierarchical, tmp_path)
+        result = run_map(ap_scores, hierarchical)
 
         assert len(result) == 1
         first_ap = ap_scores["average_precision"].iloc[0]

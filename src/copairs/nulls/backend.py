@@ -1,4 +1,4 @@
-"""Method and backend choices of the AP null sampler and p-values.
+"""Backend choices of the AP null sampler and p-values.
 
 Numba is optional (``pip install 'copairs[numba]'``). Nothing here imports it
 at module level: :func:`_import_numba_backend` loads the compiled kernels the
@@ -9,7 +9,13 @@ import warnings
 import importlib.util
 from functools import cache
 
-from copairs.methods import check_backend
+BACKENDS = ("auto", "numba", "numpy")
+
+
+def check_backend(backend: str) -> None:
+    """Raise ValueError unless ``backend`` names a known backend."""
+    if backend not in BACKENDS:
+        raise ValueError(f"unknown backend {backend!r}; expected one of {BACKENDS}")
 
 
 def available_backends() -> list[str]:

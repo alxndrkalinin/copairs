@@ -15,9 +15,14 @@ import pytest
 from scipy.stats import chisquare
 
 import copairs
-from copairs import nulls, methods
-from copairs.nulls import common, philox, pvalues, sampler
-from tests.helpers import brute_ap_pvalues, brute_group_nulls, brute_map_pvalues
+from copairs import nulls
+from copairs.nulls import common, philox, backend, pvalues, sampler
+from tests.helpers import (
+    exact_ap_null,
+    brute_ap_pvalues,
+    brute_group_nulls,
+    brute_map_pvalues,
+)
 from copairs.map.normalization import expected_ap
 
 BACKENDS = nulls.available_backends()
@@ -143,12 +148,6 @@ def test_tie_thresholds():
     ints = common.tie_thresholds(np.array([1, 2]))
     assert ints.dtype == np.float64
     np.testing.assert_array_equal(ints, np.array([1.0, 2.0]) - common.TIE_TOL)
-
-
-def exact_null(num_pos, total):
-    """Every AP value of a (num_pos, total) rank list, one per placement of positives."""
-    ranks = np.array(list(itertools.combinations(range(1, total + 1), num_pos)))
-    return (np.arange(1, num_pos + 1) / ranks).sum(axis=1) / num_pos
 
 
 def scalar_nulls(confs, null_size, seed):
@@ -284,7 +283,7 @@ def test_dtype_must_be_float32_or_float64():
 @pytest.mark.parametrize("num_pos,total", [(1, 9), (3, 10), (5, 20), (2, 60)])
 def test_matches_exact_distribution(num_pos, total):
     """Sample frequencies of each AP value match exact enumeration."""
-    exact = exact_null(num_pos, total)
+    exact = exact_ap_null(num_pos, total)
     atoms, weights = np.unique(np.round(exact, 9), return_counts=True)
     null = nulls.ap_nulls([[num_pos, total]], 200_000, seed=1, dtype=np.float64)[0]
     observed = np.bincount(
@@ -408,12 +407,13 @@ def test_map_pvalues_match_brute_force(backend, budget):
 
 
 def test_backend_validation():
-    """Unknown backends raise ValueError (unknown methods: test_unknown_method)."""
+    """Unknown backends raise ValueError; known names pass, installed or not."""
     with pytest.raises(ValueError, match="unknown backend"):
         nulls.resolve_backend("tpu")
     with pytest.raises(ValueError, match="unknown backend"):
         nulls.ap_nulls(CONFS, 4, seed=0, backend="cuda")
-    methods.check_method("legacy", "numba")  # valid names, whether installed or not
+    for name in backend.BACKENDS:
+        backend.check_backend(name)
 
 
 def test_ap_pvalues_validates_conf_ix():
