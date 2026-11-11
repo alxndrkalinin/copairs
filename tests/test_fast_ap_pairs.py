@@ -14,9 +14,8 @@ from copairs.fastap import similarity
 from copairs._backend import backend_module
 from copairs.map.average_precision import attached_pairs, _FeatureSimilarity
 
-NULL = dict(
-    null_size=2000, threshold=0.05, seed=3, progress_bar=False, null="permutation"
-)
+NULL = dict(null_size=2000, threshold=0.05, seed=3, progress_bar=False)
+NULLS = ["permutation", "joint", "copied"]
 
 
 def plate_meta(groups=8, replicates=4, plates=3):
@@ -57,6 +56,27 @@ def label_ap(feats, backend, **kwargs):
     )  # fmt: skip
 
 
+def near_ties(seed, n, step, d=64):
+    """``n`` float32 profiles with near-tied similarities.
+
+    In each triple ``i, j = i + step, k = i + 2 * step``, profile ``k``
+    mirrors ``j`` through a hyperplane holding ``i``, so both have the same
+    similarity to ``i`` in exact arithmetic. The float32 NumPy functions
+    and the float64 kernels round those two differently, and some of them
+    rank in another order.
+    """
+    rng = np.random.default_rng(seed)
+    feats = rng.standard_normal((n, d))
+    for i in [i for i in range(n - 2 * step) if i // step % 3 == 0]:
+        j, k = i + step, i + 2 * step
+        q = feats[i] / np.linalg.norm(feats[i])
+        u = rng.standard_normal(d)
+        u -= (u @ q) * q
+        u /= np.linalg.norm(u)
+        feats[k] = feats[j] - 2 * (feats[j] @ u) * u
+    return feats.astype(np.float32)
+
+
 @pytest.mark.parametrize("backend", AP_BACKENDS)
 @pytest.mark.parametrize("distance", ["cosine", "euclidean"])
 def test_pairs_recompute_the_ap_stage_similarities(backend, distance):
@@ -71,12 +91,54 @@ def test_pairs_recompute_the_ap_stage_similarities(backend, distance):
     _, rank_pairs = plate_ap(feats, backend, distance=distance, return_pairs=True)
     _, label_pairs = label_ap(feats, backend, distance=distance, return_pairs=True)
     # A label table's positives are pairs of its rows, its negatives of profiles.
-    for pairs in (rank_pairs.pos, rank_pairs.neg, label_pairs.neg):
+    for pairs in (rank_pairs["pos"], rank_pairs["neg"], label_pairs["neg"]):
         assert not np.array_equal(
             numpy(feats[pairs[:, 0]], feats[pairs[:, 1]]), kernel(pairs)
         )
-        np.testing.assert_array_equal(rank_pairs.similarity(pairs), kernel(pairs))
-        np.testing.assert_array_equal(label_pairs.similarity(pairs), kernel(pairs))
+        got = rank_pairs["similarity"](pairs)
+        np.testing.assert_array_equal(
+            got.view(np.uint32), kernel(pairs).view(np.uint32)
+        )
+        got = label_pairs["similarity"](pairs)
+        np.testing.assert_array_equal(
+            got.view(np.uint32), kernel(pairs).view(np.uint32)
+        )
+
+
+def test_distances_without_kernel_recompute_with_numpy():
+    """A Numba AP stage's pairs use NumPy where the stage did: no kernel for the distance."""
+    feats = np.random.default_rng(1).standard_normal((96, 24)).astype(np.float32)
+    _, pairs = plate_ap(feats, "numba", distance="cityblock", return_pairs=True)
+    assert pairs["similarity"].kernel_backend is None
+    numpy = compute.get_similarity_fn("cityblock", progress_bar=False)
+    np.testing.assert_array_equal(
+        pairs["similarity"](pairs["neg"]), numpy(feats, pairs["neg"], 20000)
+    )
+
+
+@pytest.mark.parametrize("multi", [False, True], ids=["single", "multilabel"])
+def test_permutation_null_reproduces_numba_aps_of_near_ties(multi):
+    """The null re-ranks a Numba AP stage's near-tied pairs as the stage did.
+
+    Recomputed by NumPy, the near ties of :func:`near_ties` rank in another
+    order for some profiles, the null's mAP of the observed labels differs
+    from the AP table's, and its check raises.
+    """
+    # Triples on one plate: label_meta's plates alternate, plate_meta's are blocks.
+    ap_fn, sameby, rows, step = (label_ap, "target", shared_labels, 3) if multi else (
+        plate_ap, "g", lambda ap: ap, 1
+    )  # fmt: skip
+    for seed in range(20):
+        feats = near_ties(seed, 96, step)
+        aps = {b: ap_fn(feats, b)["average_precision"] for b in ("numpy", "numba")}
+        if not np.allclose(*aps.values(), rtol=0, atol=1e-9, equal_nan=True):
+            break
+    else:
+        pytest.fail("no seed gave near ties that the backends rank differently")
+    ap = rows(ap_fn(feats, "numba"))
+    for null in NULLS:
+        p = mean_average_precision(ap, [sameby], null=null, **NULL)["p_value"]
+        assert ((p > 0) & (p <= 1)).all()
 
 
 @pytest.mark.parametrize("backend", AP_BACKENDS)
@@ -102,12 +164,14 @@ def test_permutation_null_ranks_by_the_kernel_similarities(backend):
 
 
 @pytest.mark.parametrize("backend", AP_BACKENDS)
-def test_kernel_ap_stages_give_numpy_pvalues(backend):
-    """Permutation p-values after a kernel AP stage equal those after NumPy's.
+@pytest.mark.parametrize("null", NULLS)
+def test_kernel_ap_stages_give_numpy_pvalues(backend, null):
+    """p-values after a kernel AP stage equal those after NumPy's, under every null.
 
     Integer features make every euclidean similarity exact in both, so the
     AP tables and the pairs (in the multilabel table, each AP row's label
-    and profile) must agree for the p-values to.
+    and profile; the label index orders positive pairs within a label
+    otherwise than SQL) must agree for the p-values to.
     """
     base = np.random.default_rng(4).integers(-3, 4, size=(96, 6)).astype(np.float64)
     plate_signal = plate_meta()["g"].isin(["g0", "g1"]).to_numpy()
@@ -123,10 +187,10 @@ def test_kernel_ap_stages_give_numpy_pvalues(backend):
             ap = ap_fn(feats, b, distance="euclidean")
             if sameby == "target":
                 ap = shared_labels(ap)
-            m = mean_average_precision(ap, [sameby], backend="numba", **NULL)
+            m = mean_average_precision(ap, [sameby], null=null, backend="numba", **NULL)
             got.append(m.sort_values(sameby).reset_index(drop=True))
         pd.testing.assert_frame_equal(*got)
-        assert 0 < got[0]["below_p"].sum() < len(got[0])
+        assert got[0]["below_p"].any() and got[0]["p_value"].nunique() > 1
 
 
 @pytest.mark.parametrize("null_backend", ["numba", "numpy"])
@@ -174,14 +238,14 @@ def test_pairs_check_the_gpu_before_every_kernel_call(monkeypatch):
     """
     feats = np.random.default_rng(6).standard_normal((96, 8)).astype(np.float32)
     _, pairs = plate_ap(feats, "cuda", return_pairs=True)
-    pairs.similarity(pairs.neg[:4])  # builds the kernel
+    pairs["similarity"](pairs["neg"][:4])  # builds the kernel
 
     def forked():
         raise RuntimeError("forked")
 
     monkeypatch.setattr("copairs._cuda.require", forked)  # imports CuPy
     with pytest.raises(RuntimeError, match="forked"):
-        pairs.similarity(pairs.neg[:4])
+        pairs["similarity"](pairs["neg"][:4])
 
 
 @pytest.mark.parametrize("backend", AP_BACKENDS)
@@ -207,7 +271,7 @@ def test_null_releases_the_kernel_it_built(backend, monkeypatch):
 
     monkeypatch.setattr(kernels, "pair_similarity", counted)
     for ap, sameby in frames:
-        similarity = attached_pairs(ap).similarity
+        similarity = attached_pairs(ap)["similarity"]
         for _ in range(2):
             mean_average_precision(ap, [sameby], backend="numba", **NULL)
             assert similarity._kernel is None

@@ -6,9 +6,10 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from copairs import nulls, compute
+from copairs import nulls
 from copairs.nulls import joint, common, permutation
 from copairs._backend import cpu_backends
+from copairs.nulls.sampler import ap_nulls
 
 COMPLETE4 = [(i, j) for i in range(4) for j in range(i + 1, 4)]
 SIGNATURES = [
@@ -258,8 +259,8 @@ def test_binomial_matches_scipy(n, p):
 @pytest.mark.parametrize("conf", [(3, 100), (1, 30), (20, 50)])
 def test_singleton_is_the_ap_null(conf):
     """A group of one member follows the AP null of its configuration."""
-    got = null_of([conf], [], 200_000).astype(np.float32)  # random_ap's precision
-    ref = compute.random_ap(200_000, conf[0], conf[0] + conf[1], seed=1)
+    got = null_of([conf], [], 200_000)
+    ref = ap_nulls([[conf[0], conf[0] + conf[1]]], 200_000, seed=1, dtype=np.float64)[0]
     assert stats.ks_2samp(got, ref).pvalue > 1e-3
 
 

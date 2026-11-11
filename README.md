@@ -33,45 +33,33 @@ pip install 'copairs[numba]'
 
 #### Null distributions and the optional Numba backend
 
-The AP and mAP p-value functions (`compute.p_values`,
-`map.average_precision.p_values`, `mean_average_precision`,
-`mean_average_precision_hierarchical` and `get_map_pvalue`) take
-`method="fast"` (default) or `"legacy"`, and a `backend`:
+The AP p-value functions (`compute.p_values`, `map.average_precision.p_values`)
+and the copied mAP null (`null="copied"` in `mean_average_precision`,
+`mean_average_precision_hierarchical` and `get_map_pvalue`) sample each AP null
+exactly (Philox counter-based RNG, Vitter's Algorithm A) in O(1) memory per
+sample, instead of permuting a `null_size x total` matrix, and stream p-values
+in bounded memory without a disk cache. Sample `j` of a `(num_pos, total)` null
+depends only on `(seed, num_pos, total, j)`, with `seed` in `[0, 2**64)`.
 
-- `"fast"` samples each AP null exactly (Philox counter-based RNG, Vitter's
-  Algorithm A) in O(1) memory per sample, instead of permuting a
-  `null_size x total` matrix, and streams p-values in bounded memory without a
-  disk cache. Sample `j` of a `(num_pos, total)` null depends only on
-  `(seed, num_pos, total, j)`, with `seed` in `[0, 2**64)`.
-- `"legacy"` is copairs 0.5.5's null, seeded per configuration and cached
-  under `cache_dir` (default `~/.copairs`). In the mAP functions it is the
-  `"copied"` null (see [mAP null distributions](#map-null-distributions)),
-  their default under it; other nulls raise.
-- The fast method's null samples come from a different random stream, so
-  p-values agree with `"legacy"` within Monte Carlo error. Its mAP p-values
-  count null values `>=` the observed mAP, as in the paper; legacy counts `>`,
-  which gives too small p-values when the mAP equals an atom of the null
-  (e.g. perfect retrieval).
-- With the NumPy backend, `"fast"` can be slower than `"legacy"` for
-  configurations with many positives at small null sizes (for 1000 positives
-  among 100,000 pairs at `null_size=1000`, 3.6 s against 1.6 s; 0.02 s with
-  Numba), so install the `numba` extra for such data.
-
+They, and the joint and permutation mAP nulls, take a `backend`.
 `backend="numpy"` needs nothing extra; `backend="numba"` compiles the same
-code with [Numba](https://numba.pydata.org) (the `numba` extra above). In the
-mAP functions, `backend` applies to each null of the fast method: the
-copied null's AP samples, the joint null's samples, and the permutation
-null's relabellings (moves of a label, for multilabel APs) and their mAPs.
-For each, the Numba backend compiles the scalar functions that define a draw
-and the NumPy backend computes the same draws vectorized. The two backends
-return bitwise-identical nulls and p-values (tested), so `backend="auto"`
-(default) uses Numba whenever it imports; if an installed Numba fails to
-import, `"auto"` warns once and uses NumPy. A Numba that imports but cannot
-compile a kernel raises instead; the tests pass on Numba 0.60 (the extra's
-minimum) and 0.68. The first call of each null under Numba compiles its
-kernels (a few seconds per null) and caches the compiled code next to
-copairs' sources, where later processes load it in under a second. `"auto"`
-never picks the GPU (see below).
+code with [Numba](https://numba.pydata.org) (the `numba` extra above). For
+each null (the AP samples of the AP and copied nulls, the joint null's
+samples, and the permutation null's relabellings, or moves of a label for
+multilabel APs, and their mAPs), the Numba backend compiles the scalar
+functions that define a draw and the NumPy backend computes the same draws
+vectorized. The two backends return bitwise-identical nulls and p-values
+(tested), so `backend="auto"` (default) uses Numba whenever it imports; if an
+installed Numba fails to import, `"auto"` warns once and uses NumPy. A Numba
+that imports but cannot compile a kernel raises instead; the tests pass on
+Numba 0.60 (the extra's minimum) and 0.68. The first call of each null under
+Numba compiles its kernels (a few seconds per null) and caches the compiled
+code next to copairs' sources, where later processes load it in under a
+second; `"auto"` never picks the GPU (see below). The NumPy backend places
+the positives one at a time, so it is slow for configurations with many
+positives at small null sizes (for 1000 positives among 100,000 pairs at
+`null_size=1000`, 3.6 s against 0.02 s with Numba); install the `numba` extra
+for such data.
 
 Numba starts one thread per host CPU. In a container or job with a CPU quota,
 set `NUMBA_NUM_THREADS` to the quota, or kernels oversubscribe the CPUs. The
@@ -142,29 +130,33 @@ We provide examples demonstrating how to use copairs for:
 - [calculating mAP to assess phenotypic activity of perturbations](https://github.com/cytomining/copairs/blob/main/docs/examples/phenotypic_activity.ipynb)
 - [calculating mAP to assess phenotypic consistency of perturbations](https://github.com/cytomining/copairs/blob/main/docs/examples/phenotypic_consistency.ipynb)
 - [estimating null size for mAP p-value calculation](https://github.com/cytomining/copairs/blob/main/docs/examples/null_size.ipynb)
+- [comparing the mAP null distributions](https://github.com/cytomining/copairs/blob/main/docs/examples/null_comparison.ipynb)
 
 ## mAP null distributions
 
 `mean_average_precision`, `mean_average_precision_hierarchical` and
-`get_map_pvalue` take `null=`, the null of a group's mAP. Under
-`method="fast"` (default) all three count null mAPs `>=` the observed mAP, so
-an mAP equal to an atom of the null (e.g. perfect retrieval) counts the atom.
+`get_map_pvalue` take `null=`, the null of a group's mAP. All three count null
+mAPs `>=` the observed mAP, so an mAP equal to an atom of the null (e.g.
+perfect retrieval) counts the atom. The models make different dependence
+assumptions; calibration depends on the experimental design.
 
-- `"permutation"` (the default under `method="fast"`) tests the paper's null hypothesis directly: within
-  each block of members ranked against the same references (e.g. one plate's
-  replicates and controls), any of the block's profiles could have carried the
-  group's label. Draws relabel profiles and recompute the mAP from the
+- `"permutation"` (default) tests exchangeability. For single-label APs it uses
+  reference-defined blocks: members ranked against identical reference sets form a block (e.g. one plate's
+  replicates and controls). Its pool contains those members and references;
+  each draw preserves the number of group members in every block. Draws relabel profiles and recompute the mAP from the
   observed similarities, so whatever dependence the data has between rank
-  lists stays in the null. For multilabel APs
-  (`map.multilabel.average_precision`, grouped by the label column), a draw
-  moves the group's label to as many profiles of each component of the
-  negative-pair graph as hold it there; those profiles keep their other
-  labels. Each group's positives must be its other members; for groups of
-  one profile whose positives are in other groups (e.g. one profile per
-  guide, positives by gene), use `"joint"`, which there is that profile's AP
-  null. It needs the pairs the APs came from, which
-  `average_precision` and `multilabel.average_precision` attach to the frame
-  they return, so the usual calls need nothing extra:
+  lists stays in the null. A relabelled profile is ranked against the
+  block's unlabelled profiles, as the members are ranked against their
+  references. The original positive and negative rules define the graph and
+  pools; neither is reapplied to fixed metadata during a draw. Profiles move
+  into roles on the original positive graph, including non-complete graphs.
+  Thus a layout rule such as `neg_diffby=["g", "plate"]` or
+  `pos_diffby=["plate"]` need not hold on the relabelled profiles.
+  All positive edges must stay inside the tested group; for groups of one profile whose
+  positives are in other groups (e.g. one profile per guide, positives by
+  gene), use `"joint"`, which there is that profile's AP null. It needs the
+  pairs the APs came from, which `average_precision` attaches to the frame
+  it returns, so the usual calls need nothing extra:
 
   ```python
   ap = copairs.map.average_precision(meta, feats, ...)
@@ -175,21 +167,20 @@ an mAP equal to an atom of the null (e.g. perfect retrieval) counts the atom.
 
   The pairs (`ap.attrs["copairs_pairs"]`) follow the frame through filtering
   and copies, but not through saving, pickling or concatenating frames of
-  different AP calls; such frames raise under this null. Filter out whole
-  groups (or controls) only: the members' APs were computed with all of
-  their group's members as positives, so dropping some members raises
-  under this null; recompute the APs on the kept profiles or use `"joint"`
-  or `"copied"`. For frames without pairs, recompute the APs, pass
-  `pairs=` (`average_precision(..., return_pairs=True)` also returns them),
-  or choose another null. The attached pairs keep the features and
+  different AP calls; frames without pairs require an explicit pair dictionary
+  or AP recomputation. `average_precision(..., return_pairs=True)` returns the
+  dictionary with `"pos"`, `"neg"` and `"similarity"` entries. Explicit `pairs=`
+  takes precedence over attachments; use `pairs["pos"]` for raw joint pairs.
+  Keep the original AP index, matching pairs and complete tested groups or labels.
+  Pair/count/layout checks do not establish source identity or group completeness.
+  Filter whole groups; recompute AP when removing members of a tested group.
+  Copies share the dictionary, backing features and pair arrays; keep them
+  unchanged between AP calculation and testing. The attached pairs keep the features and
   every positive and negative pair alive with the frame (8 bytes per pair,
   e.g. 800 MB for 10^8 negative pairs), whichever null is used;
-  `ap.attrs.pop("copairs_pairs")` drops them. A multilabel group needs every
-  AP row of its label, since any profile holding the label could hold it
-  under the null, and a label moves among every profile of the
-  negative-pair components holding it (e.g. its plates under `neg_sameby`),
-  at most 16,384 profiles: a label held on more raises, so use `"joint"`
-  or `"copied"` for it. The null recomputes similarities from the features,
+  `ap.attrs.pop("copairs_pairs")` drops them. Multilabel APs carry pair dictionaries
+  with the same lifecycle contract and use the component model described below.
+  The null recomputes similarities from the features,
   so distances that estimate their scale from each batch of pairs
   (`seuclidean`, `mahalanobis`) raise under it; use `"joint"` or `"copied"`.
   It recomputes them as the AP function did, whatever its own `backend`:
@@ -197,25 +188,16 @@ an mAP equal to an atom of the null (e.g. perfect retrieval) counts the atom.
   after `"cuda"`, so the null needs the GPU too), else in NumPy batches,
   which take 7-13 times as long (1.5-2.5 million pairs on 16 CPUs). Pass
   `backend="numba"` to the AP function when the null's time matters.
-  Relabelled profiles keep the group's positive pairs, so with `pos_diffby`
-  the references must not change them (e.g. one plate per block of
-  references when `pos_diffby=["plate"]`); layouts where they could raise.
+  Custom similarities must give the same value for a pair regardless of
+  batch size or unrelated pairs in that batch.
+  Overlapping-but-different reference sets within a single-label group remain
+  unsupported; sharing references across separate groups is allowed.
 
-  Its smallest p-value is about one over the number of distinct
-  relabellings, e.g. C(14, 2) = 91 for 2 replicates among 12 controls on one
-  plate. The null assumes the group's profiles are exchangeable with the
+  The null assumes the group's profiles are exchangeable with the
   references they are ranked against: replicates that share structure the
   references lack (the same well, clone or batch) make it too narrow, so match
   references to that structure (`neg_sameby`) or test whole units. It is the
   slowest of the three nulls, and its cost grows with group size.
-  `stop_after=10` stops a group's draws at the 10th that reaches its mAP and
-  reports 10 / draws (Besag and Clifford's sequential p-value). It spends few
-  draws on groups with large p-values, and groups that never reach 10 hits
-  run all `null_size` draws and keep their p-value; draw `j` is the same
-  either way. It stays calibrated, but p-values near a threshold carry about
-  `1 / sqrt(stop_after)` relative error however large `null_size` is, so
-  borderline calls depend on the seed: use it to screen, or raise it for
-  final calls. Other nulls reject it.
 - `"joint"` samples the members' APs together: a positive pair inside the
   group is one random number in both members' rank lists, so the null
   narrows as replicates are added. Other similarities are treated as
@@ -223,19 +205,98 @@ an mAP equal to an atom of the null (e.g. perfect retrieval) counts the atom.
   some profiles are close to many others), so on real data it can give too
   small p-values for groups of many replicates. It takes each group's
   positive pairs from the attached pairs (or `pairs=`, `pos_pairs=`), so
-  positives in other groups stay private to each member; on multilabel
-  frames a pair joins its two profiles' AP rows for the label they share.
-  Frames without pairs are treated as replicate groups when every member
-  has `len(group) - 1` positives.
-- `"copied"` is the null model of copairs <= 0.5.5: each member's AP null is
+  positives in other groups stay private to each member. Multi-member groups
+  require actual pairs: counts alone cannot identify their graph. Singletons
+  can use counts alone. Explicit `pos_pairs=` must agree with an available
+  selected pair dictionary. Missing information raises rather than selecting
+  another null.
+  Equivalent signatures share simulation draws and correlated Monte Carlo errors.
+- `"copied"` retains the earlier statistical model: each member's AP null is
   sampled per `(n_pos_pairs, n_total_pairs)` configuration and the group's
   null averages them, so members with equal pair counts share one draw and
-  the null does not narrow with replicates. Use it for results comparable to
-  0.5.5: `method="legacy"`, whose only null it is, samples and counts as
-  0.5.5 did (null mAPs `>` the observed mAP); `null="copied"` under the fast
-  method samples it exactly and counts `>=`. Both agree with 0.5.5 within
-  Monte Carlo error, not bitwise: each configuration is now seeded by its
-  pair counts.
+  the null does not narrow with replicates. Its AP draws are sampled exactly
+  and streamed, without a cache (see
+  [AP nulls](#null-distributions-and-the-optional-numba-backend)).
+
+### Multilabel component permutation
+
+`map.multilabel.average_precision` attaches a pair dictionary with additional
+profile/label mappings (`"profile"`, `"row_key"`, `"keys"`, `"label_col"`) and a
+lazy `"_lone"` pair function. The `"label_col"` entry selects the multilabel
+permutation path. Each AP row represents one (source profile, label) pair; group
+by the label column. Positive pairs index expanded AP rows; negatives index
+source profiles. Joint sampling uses the attached positive AP-row graph.
+
+For multilabel permutation, pools are connected components of the original
+negative-pair graph. A draw keeps the tested label's member count in each
+component, assigns its members' positive-graph roles to sampled profiles, and
+retains every other label. Negatives come from the original negatives plus
+pairs sharing only the tested label, excluding the selected receivers. Their
+counts can change between draws. The label column must appear in `neg_diffby`
+and not `neg_sameby`.
+
+This model accepts overlapping-but-different member reference
+sets that the single-label block model rejects. For profiles labelled `A`,
+`A+B`, `B`, `C`, the A members have references `{B, C}` and `{C}`. Their negative
+graph connects all four profiles, allowing A to move to two of them per draw.
+Other labels stay attached to their profiles, but A's overlap with them can
+change, so this tests label placement rather than an effect unique to A.
+Profiles must be exchangeable within each component; connectivity alone is
+insufficient. Use `neg_sameby` to separate plate or batch structure where needed.
+
+### Numerical policy and reproducibility
+
+**0.6.0 changes the default null and statistical results.** See the
+[migration notes](docs/migration-0.6.0.md) for API and numerical changes.
+
+- Public mAP functions default to `seed=0`; explicit `None` resolves fresh entropy
+  once per run. Seeds must be integers in `[0, 2**64)`.
+- With fixed inputs, row identities, seed and software environment, worker counts
+  and computation chunks do not change draws/results.
+- Means accumulate in float64 and are reported in the AP dtype. A null value
+  counts when `null >= score - tol`, with
+  `tol = max(1e-10, 8 * eps(AP dtype) * abs(score))`. Closely spaced distinct
+  values can fall within this tolerance.
+- Positive draw counts use Monte Carlo `(hits + 1)/(draws + 1)`, with minimum
+  sampled p-value `1/(draws + 1)`. There is no automatic exact enumeration or
+  adaptive stopping; all requested draws run.
+- `null_size=0` requests scores only, after argument/layout validation. P-values
+  and corrected values are `NaN`; significance flags are nullable booleans with
+  `pd.NA`, including hierarchical stage-1 outputs. No sampling or correction runs.
+- Rows without usable AP/positive pairs or group keys are excluded with a log
+  warning. No usable groups, invalid data or unsupported layouts raise.
+
+### Per-call permutation resources
+
+All three public mAP functions accept these keyword arguments:
+
+```python
+max_reference_profiles = 16_384
+pool_memory_budget = 4 * 1024**3
+key_table_memory_budget = 256 * 1024**2
+```
+
+The reference cap is a non-negative integer counting reference **profile rows
+across all blocks of one tested group**, not compounds or the total dataset.
+For multilabel APs, it counts the union of the group's components **minus that
+label's members**, summed across all its components. Pool tables include members
+and may therefore be larger than reference-only tables at the same cap.
+Splitting the same references into additional blocks does not reduce that count.
+It is checked before building quadratic pool tables. Raising it can require
+substantially more RAM.
+
+The positive pool byte budget schedules estimated concurrent key/rank-table
+memory; **one oversized pool may run alone**. The non-negative key-table budget
+limits an optional cross-pool reuse table; zero disables that optimization.
+The budgets cover tables rather than total process RAM; features, layouts and
+temporary arrays need additional memory. Per-call settings leave global limits
+unchanged.
+
+`max_workers` controls permutation group work and shared-key construction, plus
+the copied null's NumPy sampler threads. It does not control joint sampling, DuckDB,
+the original AP similarity thread pool, or BLAS/internal library threads;
+Numba's kernels run on Numba's threads (see the Numba backend above).
+Persistent joint/permutation caches are separate work.
 
 ## Performance
 
@@ -243,7 +304,7 @@ an mAP equal to an atom of the null (e.g. perfect retrieval) counts the atom.
 `matching.find_pairs_multilabel` and `map.normalization.normalize_ap` take
 `backend="numpy"` (default) or `"numba"`, and the two AP functions also
 `"cuda"` (see [GPU acceleration](#gpu-acceleration-optional)). `"numpy"`
-has no optional dependencies and gives the results of copairs <= 0.5.5.
+has no optional dependencies and gives the APs of earlier copairs releases.
 `"numba"` needs the `numba` extra, which is imported only when requested:
 
 ```python
@@ -265,7 +326,10 @@ Given the same similarities, APs agree with `"numpy"` to float64 rounding, and
 normalized APs bit for bit. The kernels' similarities match the NumPy ones to
 float32 rounding, so near-tied pairs can rank differently. They compute in
 float64, so float32 profiles whose norms overflow float32 (entries around 1e19
-and up) get their actual similarity instead of 0 or NaN.
+and up) get their actual similarity instead of 0 or NaN. The pairs a Numba AP
+stage attaches recompute similarities with the same kernels (on the null's
+threads, serially, with the same bits), so `null="permutation"` ranks pairs as
+the APs did; the kernel's copy of the features lives for one null.
 
 For Numba's threads, CPU quotas and `fork`, see
 [Null distributions and the optional Numba backend](#null-distributions-and-the-optional-numba-backend).

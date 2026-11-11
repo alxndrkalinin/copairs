@@ -18,15 +18,14 @@ from copairs.matching import (
 
 from .filter import flatten_str_list, evaluate_and_filter, validate_pipeline_input
 from .normalization import normalize_ap
-from .average_precision import (
-    LabelPairs,
-    _columns,
-    attach_pairs,
-    _diffby_codes,
-    similarity_fns,
-)
+from .average_precision import attach_pairs, similarity_fns
 
 logger = logging.getLogger("copairs")
+
+
+def _columns(cols) -> list:
+    """Column name or sequence of column names as a list."""
+    return [cols] if isinstance(cols, str) else list(cols)
 
 
 def _create_neg_query_solver(neg_pairs, neg_sims, num_profiles):
@@ -93,8 +92,8 @@ def average_precision(
     batch_size=20000,
     distance="cosine",
     progress_bar: bool = True,
-    backend: Literal["numpy", "numba", "cuda"] = "numpy",
     return_pairs: bool = False,
+    backend: Literal["numpy", "numba", "cuda"] = "numpy",
 ) -> pd.DataFrame:
     """
     Compute average precision with multilabel support.
@@ -102,15 +101,30 @@ def average_precision(
     Returns normalized_average_precision in addition to average_precision.
     Each row is one (profile, label) pair: the profile's AP for that label.
 
-    The :class:`~copairs.map.LabelPairs` the APs were computed from, which
+    The pair dictionary the APs were computed from, which
     ``null="permutation"`` in :func:`copairs.map.mean_average_precision`
     needs, are attached to the returned frame as
     ``frame.attrs["copairs_pairs"]``, as in
     :func:`copairs.map.average_precision`; ``return_pairs=True`` also returns
-    them, as a ``(DataFrame, LabelPairs)`` tuple. They keep ``feats``, every
+    them, as a ``(DataFrame, dict)`` tuple. Entries ``"pos"`` and ``"neg"``
+    are positive AP-row and negative source-profile pairs; ``"similarity"``
+    maps source-profile pairs to similarities. ``"profile"`` and ``"row_key"``
+    map AP rows to source profiles and labels in ``"keys"``; ``"label_col"``
+    names the label column and selects multilabel permutation. ``"_lone"``
+    is a lazy function returning pairs sharing only one label (or None for
+    unsupported negative rules). These entries keep ``feats``, every
     positive and negative pair (8 bytes per pair) and each AP row's profile
     and label (12 bytes per row) alive with the frame, whichever null is
-    used; drop them with ``frame.attrs.pop("copairs_pairs")``.
+    used; drop them with ``frame.attrs.pop("copairs_pairs")``. Preserve the
+    original index, matching pairs and all holders of each tested label;
+    validation checks structure, not source identity or label completeness.
+    Filter whole labels or recompute AP. Copies share features and pair/mapping
+    arrays; keep them unchanged between AP and mAP testing. Saved tables contain
+    results only; later permutation testing needs the original pair dictionary
+    or AP recomputation. The multilabel permutation null uses
+    connected components of the negative graph, with fixed draws and member
+    counts per component, keeping other labels fixed. Its exchangeability
+    assumption is distinct from the single-label reference-block model.
 
     Parameters
     ----------
@@ -185,7 +199,7 @@ def average_precision(
                 multilabel_col: label_values,
             }
         )
-        row_key = label.astype(np.int32)  # rows by label, then profile
+        row_key = label.astype(np.int32)
     else:
         logger.info("Computing AP per label...")
         negs_for = _create_neg_query_solver(neg_pairs, neg_sims, len(meta))
@@ -220,7 +234,8 @@ def average_precision(
             np.arange(len(keys), dtype=np.int32), list(map(len, ix_list))
         )
     # The merged frame keeps these rows' positions as its index, so row i of
-    # the AP frame is profile ix[i] for label keys[row_key[i]].
+    # the AP frame is profile ix[i] for label keys[row_key[i]]: rows are
+    # ordered by label and then profile under either backend.
     profile = results["ix"].to_numpy().astype(np.int64)
     pos_rows = _row_pairs(pos_pairs, pos_counts, profile, row_key)
     lone = None
@@ -235,22 +250,20 @@ def average_precision(
         else:
             cols = list(dict.fromkeys([multilabel_col, *sameby, *other]))
             lone = partial(_lone_pairs, meta[cols], multilabel_col, sameby, other, keys)
-    diffby = [c for c in _columns(pos_diffby) if c != multilabel_col]
-    pairs = LabelPairs(
-        pos_rows,
-        np.asarray(neg_pairs),
-        similarity,
-        _diffby_codes(meta, diffby),
-        profile=profile,
-        row_key=row_key,
-        label_col=multilabel_col,
-        keys=np.asarray(keys),
-        _lone=lone,
-    )
     meta = meta.drop(multilabel_col, axis=1)
     results = meta.merge(results, right_on="ix", left_index=True).drop("ix", axis=1)
     results["n_pos_pairs"] = results["n_pos_pairs"].fillna(0).astype(np.uint32)
     results["n_total_pairs"] = results["n_total_pairs"].fillna(0).astype(np.uint32)
+    pairs = {
+        "pos": pos_rows,
+        "neg": np.asarray(neg_pairs),
+        "similarity": similarity,
+        "profile": profile,
+        "row_key": row_key,
+        "label_col": multilabel_col,
+        "keys": np.asarray(keys),
+        "_lone": lone,
+    }
     attach_pairs(results, pairs)
     logger.info("Finished.")
     return (results, pairs) if return_pairs else results

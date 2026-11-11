@@ -1,4 +1,4 @@
-"""Method and backend choices of the AP null sampler and p-values.
+"""Backend choices of the AP null sampler and p-values.
 
 Numba (``pip install 'copairs[numba]'``) and CuPy (``pip install
 'copairs[gpu]'``) are optional. Nothing here imports them at module level:
@@ -7,8 +7,15 @@ kernels the first time their backend is used, and ``"auto"`` checks for
 Numba (:func:`copairs._backend.available_backends` lists both).
 """
 
-from copairs.methods import check_backend
 from copairs._backend import kernels, cpu_backends, step_backend
+
+BACKENDS = ("auto", "cuda", "numba", "numpy")
+
+
+def check_backend(backend: str) -> None:
+    """Raise ValueError unless ``backend`` names a known backend."""
+    if backend not in BACKENDS:
+        raise ValueError(f"unknown backend {backend!r}; expected one of {BACKENDS}")
 
 
 def resolve_backend(backend: str, step: str = "map_nulls") -> str:

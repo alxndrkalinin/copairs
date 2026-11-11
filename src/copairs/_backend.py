@@ -1,6 +1,6 @@
 """Import copairs' optional backends and find which are usable.
 
-The backend names are in :mod:`copairs.methods`. A module of its own, free of
+The backend names are in :mod:`copairs.nulls.backend`. A module of its own, free of
 SciPy, Numba and CuPy, so that copairs.matching can import it at the top
 while ``import copairs`` stays light.
 """

@@ -11,6 +11,8 @@ identical function.
 
 import numpy as np
 
+from copairs.nulls.common import check_seed
+
 M32 = np.uint64(0xFFFFFFFF)
 S32 = np.uint64(32)
 PHILOX_M0 = np.uint64(0xD2511F53)
@@ -54,8 +56,7 @@ def config_key_arrays(seed: int, num_pos: np.ndarray, total: np.ndarray):
     A key depends only on ``(seed, num_pos, total)``, so a configuration's null
     is the same whichever other configurations are computed alongside it.
     """
-    if not 0 <= seed < 2**64:
-        raise ValueError(f"seed must be in [0, 2**64), got {seed}")
+    check_seed(seed)
     num_pos, total = np.asarray(num_pos), np.asarray(total)
     if len(num_pos) and (num_pos.max() >= 2**32 or total.max() >= 2**32):
         raise ValueError("num_pos and total must be < 2**32")
