@@ -18,10 +18,7 @@ from copairs.matching import (
 
 from .filter import flatten_str_list, evaluate_and_filter, validate_pipeline_input
 from .normalization import normalize_ap
-from .average_precision import (
-    attach_pairs,
-    _FeatureSimilarity,
-)
+from .average_precision import attach_pairs, similarity_fns
 
 logger = logging.getLogger("copairs")
 
@@ -148,9 +145,9 @@ def average_precision(
     columns = flatten_str_list(pos_sameby, pos_diffby, neg_sameby, neg_diffby)
     meta, columns = evaluate_and_filter(meta, columns)
     validate_pipeline_input(meta, feats, columns)
-    distance_fn = compute.get_similarity_fn(distance, progress_bar=progress_bar)
-    if fastap is not None:
-        distance_fn = fastap.similarity_fn(feats, distance, distance_fn)
+    distance_fn, similarity = similarity_fns(
+        fastap, backend, feats, distance, batch_size, progress_bar
+    )
     # Critical!, otherwise the indexing wont work
     meta = meta.reset_index(drop=True).copy()
 
@@ -258,7 +255,7 @@ def average_precision(
     pairs = {
         "pos": pos_rows,
         "neg": np.asarray(neg_pairs),
-        "similarity": _FeatureSimilarity(feats, distance, batch_size),
+        "similarity": similarity,
         "profile": profile,
         "row_key": row_key,
         "label_col": multilabel_col,

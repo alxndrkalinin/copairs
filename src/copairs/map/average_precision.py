@@ -1,6 +1,7 @@
 """Functions to compute average precision."""
 
 import logging
+import threading
 from typing import List, Literal
 
 import numpy as np
@@ -64,21 +65,37 @@ def attached_pairs(frame: pd.DataFrame):
     return handle.pairs if isinstance(handle, _AttachedPairs) else None
 
 
+# Held while a null's thread builds a similarity kernel, so that the null's
+# other threads wait for it instead of building their own copies.
+_BUILD = threading.Lock()
+
+
 class _FeatureSimilarity:
     """``pairs -> similarities`` of an AP call's features, as its AP stage computed them.
 
-    Batches of ``batch_size`` pairs go through the same pairwise function as
-    in :func:`copairs.compute.get_similarity_fn`, one after another in the
-    calling thread: the nulls call it from their own worker threads.
+    With ``kernel_backend="numba"``, the AP stage's similarities came from a
+    Numba kernel, and so do these: the kernel's serial form (the same bits),
+    built on first use with its own copy of the features and kept with this
+    object. The nulls call it from their worker threads, where it runs on
+    the calling thread; many small parallel launches from several threads
+    cost more than they gain, and Numba's workqueue threading layer stops
+    the process on concurrent launches. Otherwise batches of ``batch_size``
+    pairs go through the same pairwise function as in
+    :func:`copairs.compute.get_similarity_fn`, one after another in the
+    calling thread.
     """
 
-    def __init__(self, feats, distance, batch_size):
+    def __init__(self, feats, distance, batch_size, kernel_backend=None):
         self.feats = feats
         self.distance = distance
         self.batch_size = batch_size
+        self.kernel_backend = kernel_backend
         self._fn = compute.pairwise_similarity_fn(distance)
+        self._kernel = None
 
     def __call__(self, pairs):
+        if self.kernel_backend is not None:
+            return self._kernel_sims(pairs)
         pairs = np.asarray(pairs)
         out = np.empty(len(pairs), dtype=np.float32)
         for lo in range(0, len(pairs), self.batch_size):
@@ -87,6 +104,33 @@ class _FeatureSimilarity:
                 self.feats[batch[:, 0]], self.feats[batch[:, 1]]
             )
         return out
+
+    def _kernel_sims(self, pairs):
+        """Return the kernel's similarities of ``pairs``, built by the first call."""
+        kernel = self._kernel
+        if kernel is None:
+            with _BUILD:  # one build (one copy of the features) at a time
+                kernel = self._kernel
+                if kernel is None:
+                    kernels = backend_module(self.kernel_backend)
+                    kernel = self._kernel = kernels.pair_similarity(
+                        self.feats, self.distance, parallel=False
+                    )
+        return kernel(pairs)
+
+
+def similarity_fns(fastap, backend, feats, distance, batch_size, progress_bar):
+    """Return an AP stage's similarity function and the nulls' recompute of it.
+
+    The function is ``fastap``'s kernel for ``distance`` where ``fastap``
+    (the AP stage's kernels for ``backend``, None for NumPy) has one, else
+    :func:`copairs.compute.get_similarity_fn`'s; the recompute is the
+    :class:`_FeatureSimilarity` that gives the same similarities.
+    """
+    generic = compute.get_similarity_fn(distance, progress_bar=progress_bar)
+    fn = generic if fastap is None else fastap.similarity_fn(feats, distance, generic)
+    kernel_backend = None if fn is generic else backend
+    return fn, _FeatureSimilarity(feats, distance, batch_size, kernel_backend)
 
 
 def check_recomputable(similarity) -> None:
@@ -273,6 +317,10 @@ def average_precision(
         computed in float64, so float32 rows whose norms overflow float32 get
         their actual similarity. The kernels take all pairs at once:
         ``batch_size`` and ``progress_bar`` apply only to the other distances.
+        The pairs attached to the frame recompute similarities with the same
+        kernels, so the permutation null ranks pairs as the APs did; its
+        first recompute builds the kernel's own copy of ``feats``, which the
+        pairs then keep.
 
     Returns
     -------
@@ -308,10 +356,11 @@ def average_precision(
     meta, columns = evaluate_and_filter(meta, columns)
     validate_pipeline_input(meta, feats, columns)
 
-    # Get the distance function for similarity calculations (e.g., cosine)
-    similarity_fn = compute.get_similarity_fn(distance, progress_bar=progress_bar)
-    if fastap is not None:
-        similarity_fn = fastap.similarity_fn(feats, distance, similarity_fn)
+    # Get the distance function for similarity calculations (e.g., cosine),
+    # and the pairs' function that recomputes the same similarities
+    similarity_fn, similarity = similarity_fns(
+        fastap, backend, feats, distance, batch_size, progress_bar
+    )
 
     # Reset metadata index for consistent indexing
     meta = meta.reset_index(drop=True).copy()
@@ -377,7 +426,7 @@ def average_precision(
     pairs = {
         "pos": pos_pairs,
         "neg": neg_pairs,
-        "similarity": _FeatureSimilarity(feats, distance, batch_size),
+        "similarity": similarity,
     }
     attach_pairs(meta, pairs)
     return (meta, pairs) if return_pairs else meta
