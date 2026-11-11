@@ -27,6 +27,7 @@ from copairs.map.hierarchical_fdr import (
 )
 from copairs.map.average_precision import (
     attached_pairs,
+    release_kernel,
     check_recomputable,
 )
 
@@ -314,20 +315,25 @@ def get_map_pvalue(
             max_workers=max_workers,
             **resources,
         )
-        if "label_col" in pairs:
-            pvalues = permutation.label_permutation_pvalues(
-                *arguments, pairs, null_size, seed, **options
-            )
-        else:
-            pvalues = permutation.permutation_pvalues(
-                *arguments,
-                pairs["pos"],
-                pairs["neg"],
-                pairs["similarity"],
-                null_size,
-                seed,
-                **options,
-            )
+        try:
+            if "label_col" in pairs:
+                pvalues = permutation.label_permutation_pvalues(
+                    *arguments, pairs, null_size, seed, **options
+                )
+            else:
+                pvalues = permutation.permutation_pvalues(
+                    *arguments,
+                    pairs["pos"],
+                    pairs["neg"],
+                    pairs["similarity"],
+                    null_size,
+                    seed,
+                    **options,
+                )
+        finally:
+            # The kernel's copy of the features lives for one null, not with
+            # the frame.
+            release_kernel(pairs["similarity"])
         map_scores["p_value"] = pvalues
         return map_scores
 

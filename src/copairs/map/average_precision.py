@@ -75,8 +75,9 @@ class _FeatureSimilarity:
 
     With ``kernel_backend="numba"``, the AP stage's similarities came from a
     Numba kernel, and so do these: the kernel's serial form (the same bits),
-    built on first use with its own copy of the features and kept with this
-    object. The nulls call it from their worker threads, where it runs on
+    built on first use with its own copy of the features and kept until
+    :meth:`release`, which :func:`copairs.map.get_map_pvalue` calls when
+    its null returns. The nulls call it from their worker threads, where it runs on
     the calling thread; many small parallel launches from several threads
     cost more than they gain, and Numba's workqueue threading layer stops
     the process on concurrent launches. Otherwise batches of ``batch_size``
@@ -107,7 +108,7 @@ class _FeatureSimilarity:
 
     def _kernel_sims(self, pairs):
         """Return the kernel's similarities of ``pairs``, built by the first call."""
-        kernel = self._kernel
+        kernel = self._kernel  # one read: release() may clear it meanwhile
         if kernel is None:
             with _BUILD:  # one build (one copy of the features) at a time
                 kernel = self._kernel
@@ -117,6 +118,16 @@ class _FeatureSimilarity:
                         self.feats, self.distance, parallel=False
                     )
         return kernel(pairs)
+
+    def release(self) -> None:
+        """Drop the kernel and its copy of the features; a later call rebuilds them."""
+        self._kernel = None
+
+
+def release_kernel(similarity) -> None:
+    """Drop the kernel a null built in ``similarity`` (a :class:`_FeatureSimilarity`)."""
+    if isinstance(similarity, _FeatureSimilarity):
+        similarity.release()
 
 
 def similarity_fns(fastap, backend, feats, distance, batch_size, progress_bar):
@@ -318,9 +329,9 @@ def average_precision(
         their actual similarity. The kernels take all pairs at once:
         ``batch_size`` and ``progress_bar`` apply only to the other distances.
         The pairs attached to the frame recompute similarities with the same
-        kernels, so the permutation null ranks pairs as the APs did; its
-        first recompute builds the kernel's own copy of ``feats``, which the
-        pairs then keep.
+        kernels, so the permutation null ranks pairs as the APs did; each
+        permutation null builds the kernel's own copy of ``feats`` and drops
+        it when it returns.
 
     Returns
     -------

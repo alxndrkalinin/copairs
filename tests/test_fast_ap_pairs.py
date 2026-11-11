@@ -9,7 +9,7 @@ pytest.importorskip("numba", reason="Numba optional extra is unavailable")
 from copairs import fastap, compute
 from copairs.map import multilabel, average_precision, mean_average_precision
 from copairs.fastap import similarity
-from copairs.map.average_precision import _FeatureSimilarity
+from copairs.map.average_precision import attached_pairs, _FeatureSimilarity
 
 NULL = dict(null_size=2000, threshold=0.05, seed=3, progress_bar=False)
 NULLS = ["permutation", "joint", "copied"]
@@ -225,3 +225,30 @@ def test_null_threads_compute_similarities_serially(monkeypatch):
     for ap, sameby in frames:
         mean_average_precision(ap, [sameby], **NULL)
     assert sims and not parallel
+
+
+def test_null_releases_the_kernel_it_built(monkeypatch):
+    """Each permutation null drops the AP stage's kernel when it returns.
+
+    The kernel holds its own copy of the features, which the frame's pairs
+    would otherwise keep; the next null builds it again.
+    """
+    feats = np.random.default_rng(7).standard_normal((96, 8)).astype(np.float32)
+    frames = (
+        (plate_ap(feats, "numba"), "g"),
+        (shared_labels(label_ap(feats, "numba")), "target"),
+    )
+    builds = []
+    build = fastap.pair_similarity
+
+    def counted(*args, **kwargs):
+        builds.append(args[1])
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(fastap, "pair_similarity", counted)
+    for ap, sameby in frames:
+        similarity = attached_pairs(ap)["similarity"]
+        for _ in range(2):
+            mean_average_precision(ap, [sameby], **NULL)
+            assert similarity._kernel is None
+    assert builds == ["cosine"] * 4
