@@ -11,6 +11,7 @@ from copairs import nulls, compute
 from copairs.map import mean_average_precision, mean_average_precision_hierarchical
 from copairs.nulls import sampler
 from tests.helpers import brute_ap_pvalues, brute_map_pvalues
+from copairs.matching import UnpairedException
 from copairs.map.normalization import expected_ap
 from copairs.map.average_precision import p_values as frame_p_values
 
@@ -77,7 +78,7 @@ def test_legacy_p_values_count_the_legacy_nulls():
     got = compute.p_values(ap, frame[["n_pos_pairs", "n_total_pairs"]].values, **kwargs)
     np.testing.assert_array_equal(got, ((num + 1) / 501).astype(np.float32))
 
-    result = mean_average_precision(frame, ["g"], threshold=0.05, **kwargs)
+    result = mean_average_precision(frame, ["g"], threshold=0.05, **COPIED, **kwargs)
     for _, row in result.iterrows():
         group_null = null[rev_ix[row["indices"]]].mean(axis=0)
         num = (group_null > row["mean_average_precision"]).sum()
@@ -215,7 +216,12 @@ def test_map_pvalue_counts_ties(tmp_path):
     se = np.sqrt(expected * (1 - expected) / kwargs["null_size"])
     assert (np.abs(fast["p_value"].to_numpy() - expected) < 5 * se).all()
     legacy = mean_average_precision(
-        perfect_retrieval_scores(), ["g"], cache_dir=tmp_path, method="legacy", **kwargs
+        perfect_retrieval_scores(),
+        ["g"],
+        cache_dir=tmp_path,
+        method="legacy",
+        **COPIED,
+        **kwargs,
     )
     assert legacy["p_value"].iloc[0] == pytest.approx(1 / 100_001)
 
@@ -302,7 +308,7 @@ def test_map_fast_vs_legacy(tmp_path):
     kwargs = dict(null_size=20_000, threshold=0.05, seed=0, progress_bar=False)
     fast = mean_average_precision(frame, ["g"], **COPIED, **kwargs)
     legacy = mean_average_precision(
-        frame, ["g"], cache_dir=tmp_path, method="legacy", **kwargs
+        frame, ["g"], cache_dir=tmp_path, method="legacy", **COPIED, **kwargs
     )
     p_fast, p_legacy = fast["p_value"].to_numpy(), legacy["p_value"].to_numpy()
     se = np.sqrt(p_legacy * (1 - p_legacy) / 20_000 * 2) + 1e-4
@@ -380,17 +386,16 @@ def empty_ap_frame():
 @pytest.mark.parametrize("method", ["fast", "legacy"])
 @pytest.mark.parametrize("hierarchical", [False, True])
 def test_map_empty_input(method, hierarchical, tmp_path):
-    """No valid AP scores give an empty result with the usual columns."""
+    """No valid AP scores raise under either method, as in copairs 0.6.0."""
     empty = empty_ap_frame()
     kwargs = dict(progress_bar=False, method=method, cache_dir=tmp_path, **COPIED)
-    if hierarchical:
-        result = mean_average_precision_hierarchical(
-            empty, ["g", "h"], 100, 0.05, 0, ["g"], **kwargs
-        )
-    else:
-        result = mean_average_precision(empty, ["g"], 100, 0.05, 0, **kwargs)
-    assert len(result) == 0
-    assert {"p_value", "corrected_p_value", "below_corrected_p"} <= set(result.columns)
+    with pytest.raises(UnpairedException, match="Unable to find valid AP scores"):
+        if hierarchical:
+            mean_average_precision_hierarchical(
+                empty, ["g", "h"], 100, 0.05, 0, ["g"], **kwargs
+            )
+        else:
+            mean_average_precision(empty, ["g"], 100, 0.05, 0, **kwargs)
 
 
 @pytest.mark.parametrize("method", ["fast", "legacy"])

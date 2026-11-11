@@ -22,14 +22,12 @@ def check_method(method: str, backend: str = "auto") -> None:
     check_backend(backend)
 
 
-def check_null(method: str, null: str | None) -> str:
-    """Return the mAP null to use: ``null``, or the method's default.
+def check_null(null: str, method: str = "fast") -> str:
+    """Return ``null``; raise ValueError unless it names a known mAP null.
 
-    The fast method defaults to the ``"permutation"`` null; ``method="legacy"``
-    reproduces copairs <= 0.5.5, whose only null is ``"copied"``.
+    ``method="legacy"`` reproduces copairs <= 0.5.5, whose only null is
+    ``"copied"``, so other nulls raise under it.
     """
-    if null is None:
-        return "permutation" if method == "fast" else "copied"
     if null not in NULLS:
         raise ValueError(f"unknown null {null!r}; expected one of {NULLS}")
     if method == "legacy" and null != "copied":

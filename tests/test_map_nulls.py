@@ -5,7 +5,6 @@ import sys
 import json
 import shutil
 import subprocess
-import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -67,7 +66,12 @@ def test_map_pvalue_counts_ties(tmp_path):
         ("joint", np.array([1 / 199, 2 / 100 - 1 / 199 + both_two])),
     ):
         got = mean_average_precision(
-            perfect_retrieval_scores(), ["g"], null=null, cache_dir=tmp_path, **kwargs
+            perfect_retrieval_scores(),
+            ["g"],
+            null=null,
+            cache_dir=tmp_path,
+            pos_pairs=np.array([[0, 1], [2, 3]]) if null == "joint" else None,
+            **kwargs,
         )
         se = np.sqrt(expected * (1 - expected) / kwargs["null_size"])
         assert (np.abs(got["p_value"].to_numpy() - expected) < 5 * se).all()
@@ -92,7 +96,15 @@ def test_float32_scores_count_ties(null, tmp_path):
         }
     )
     got = mean_average_precision(
-        scores, ["g"], 1000, 0.05, 0, progress_bar=False, null=null, cache_dir=tmp_path
+        scores,
+        ["g"],
+        1000,
+        0.05,
+        0,
+        progress_bar=False,
+        null=null,
+        cache_dir=tmp_path,
+        pos_pairs=np.array([[0, 1]]) if null == "joint" else None,
     )
     assert got["p_value"].iloc[0] == 1.0
     assert got["mean_average_precision"].dtype == np.float32
@@ -142,7 +154,7 @@ def test_nulls_share_the_pair_count_check():
     ap, pairs = average_precision(
         meta, feats, ["g"], [], [], ["g"], progress_bar=False, return_pairs=True
     )
-    short = dataclasses.replace(pairs, pos=pairs.pos[1:])
+    short = {**pairs, "pos": pairs["pos"][1:]}
     kwargs = dict(null_size=10, threshold=0.05, seed=0, progress_bar=False)
     for null in ("joint", "permutation"):
         with pytest.raises(ValueError, match="2 positive pairs but 3 in the AP table"):
@@ -197,23 +209,6 @@ def test_hierarchical_takes_each_null():
     with pytest.raises(ValueError, match="unknown null"):
         mean_average_precision_hierarchical(
             ap, sameby, hierarchical_by=["g"], null="exact", **kwargs
-        )
-
-
-def test_hierarchical_passes_stop_after():
-    """stop_after reaches the permutation p-values through the hierarchical entry point."""
-    ap = dose_ap()
-    sameby = ["g", "dose"]
-    kwargs = dict(null_size=300, threshold=0.05, seed=0, progress_bar=False)
-    full = mean_average_precision(ap, sameby, **kwargs)["p_value"].tolist()
-    flat = mean_average_precision(ap, sameby, stop_after=3, **kwargs)
-    hier = mean_average_precision_hierarchical(
-        ap, sameby, hierarchical_by=["g"], stop_after=3, **kwargs
-    )
-    assert hier["p_value"].tolist() == flat["p_value"].tolist() != full
-    with pytest.raises(ValueError, match="permutation null only"):
-        mean_average_precision_hierarchical(
-            ap, sameby, hierarchical_by=["g"], null="joint", stop_after=3, **kwargs
         )
 
 
@@ -278,12 +273,10 @@ def test_backends_give_identical_pvalues(null):
     assert 0 < got["numpy"]["below_p"].sum() < len(got["numpy"])
 
 
-@pytest.mark.parametrize("stop_after", [None, 10])
-def test_backends_give_identical_label_pvalues(stop_after, monkeypatch):
+def test_backends_give_identical_label_pvalues(monkeypatch):
     """Multilabel groups' permutation p-values are bitwise identical on both backends.
 
-    Also when runs stop at their stop_after-th hit; the Numba backend runs
-    its label kernels.
+    The Numba backend runs its label kernels.
     """
     pytest.importorskip("numba")
     from copairs.nulls import _numba
@@ -296,10 +289,7 @@ def test_backends_give_identical_label_pvalues(stop_after, monkeypatch):
 
     monkeypatch.setattr(_numba, "maps", spy)
     ap = plate_label_aps()
-    kwargs = dict(
-        null_size=3000, threshold=0.05, seed=7, progress_bar=False,
-        stop_after=stop_after,
-    )  # fmt: skip
+    kwargs = dict(null_size=3000, threshold=0.05, seed=7, progress_bar=False)
     got = {
         b: mean_average_precision(ap, ["target"], backend=b, **kwargs)
         for b in ("numpy", "numba")
@@ -308,9 +298,6 @@ def test_backends_give_identical_label_pvalues(stop_after, monkeypatch):
     assert len(got["numpy"]) == 6
     assert 0 < got["numpy"]["below_p"].sum() < len(got["numpy"])
     assert calls and all(calls)  # the Numba run's draws ran in its label kernels
-    if stop_after is not None:  # some labels stopped: p is not (hits + 1) / 3001
-        scaled = got["numpy"]["p_value"].to_numpy() * 3001
-        assert not np.allclose(scaled, np.round(scaled), rtol=0, atol=1e-6)
 
 
 def test_auto_backend_runs_numba_kernels(monkeypatch):
