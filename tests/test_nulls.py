@@ -88,9 +88,11 @@ def test_config_key_arrays_match_scalar(seed):
 
 @pytest.mark.parametrize("seed", [-1, 2**64])
 def test_seed_out_of_range(seed):
-    """Seeds outside [0, 2**64) raise."""
+    """Seeds outside [0, 2**64) raise in config_key_arrays and resolve_seed."""
     with pytest.raises(ValueError, match="seed must be"):
         philox.config_key_arrays(seed, np.array([1]), np.array([2]))
+    with pytest.raises(ValueError, match="seed must be"):
+        common.resolve_seed(seed)
 
 
 def test_config_keys_reject_wide_configurations():
@@ -569,7 +571,8 @@ p = compute.p_values(np.array([0.5, 1.0]), np.array([[2, 10], [1, 4]]), 100, 0,
 frame = pd.DataFrame({"g": ["a", "a"], "average_precision": [0.5, 0.6],
                       "normalized_average_precision": 0.0, "n_pos_pairs": 1,
                       "n_total_pairs": 10})
-m = mean_average_precision(frame, ["g"], 100, 0.05, 0, progress_bar=False)
+m = mean_average_precision(frame, ["g"], 100, 0.05, 0, progress_bar=False,
+                           null="copied")
 assert "numba" not in sys.modules
 print(list(p), list(m["p_value"]))
 """
@@ -603,7 +606,8 @@ with warnings.catch_warnings(record=True) as caught:
     assert nulls.resolve_backend("auto") == "numpy"
     p = compute.p_values(np.array([0.5, 1.0]), [[2, 10], [1, 4]], 100, 0,
                          progress_bar=False)
-    m = mean_average_precision(frame, ["g"], 100, 0.05, 0, progress_bar=False)
+    m = mean_average_precision(frame, ["g"], 100, 0.05, 0, progress_bar=False,
+                               null="copied")
 shown = [str(w.message) for w in caught if w.category is RuntimeWarning]
 assert len(shown) == 1 and "simulated broken numba" in shown[0], shown
 expected = compute.p_values(np.array([0.5, 1.0]), [[2, 10], [1, 4]], 100, 0,

@@ -16,6 +16,7 @@ from copairs.map import (
 )
 from copairs.nulls import sampler
 from tests.helpers import brute_ap_pvalues, brute_map_pvalues
+from copairs.matching import UnpairedException
 from copairs.map.normalization import expected_ap
 from copairs.map.average_precision import p_values as frame_p_values
 
@@ -64,7 +65,7 @@ def test_legacy_method_is_the_seeded_0_5_5_null(tmp_path):
 
 
 def test_legacy_p_values_count_the_legacy_nulls():
-    """Legacy AP and mAP p-values are counts over the legacy nulls (``>=`` / ``>``)."""
+    """Legacy AP and mAP p-values are ``>=`` counts over the legacy nulls."""
     rng = np.random.default_rng(5)
     frame = random_ap_frame(rng, n=60, n_groups=10)
     kwargs = dict(null_size=500, seed=3, progress_bar=False, method="legacy")
@@ -78,10 +79,13 @@ def test_legacy_p_values_count_the_legacy_nulls():
     got = compute.p_values(ap, frame[["n_pos_pairs", "n_total_pairs"]].values, **kwargs)
     np.testing.assert_array_equal(got, ((num + 1) / 501).astype(np.float32))
 
-    result = mean_average_precision(frame, ["g"], threshold=0.05, **kwargs)
+    result = mean_average_precision(
+        frame, ["g"], threshold=0.05, null="copied", **kwargs
+    )
     for _, row in result.iterrows():
-        group_null = null[rev_ix[row["indices"]]].mean(axis=0)
-        num = (group_null > row["mean_average_precision"]).sum()
+        group_null = null[rev_ix[row["indices"]]].mean(axis=0, dtype=np.float64)
+        score = np.float32(row["mean_average_precision"])
+        num = (group_null >= nulls.tie_thresholds(score)).sum()
         assert row["p_value"] == (num + 1) / 501
 
 
@@ -94,6 +98,7 @@ def test_fast_is_the_default(backend, tmp_path):
     np.testing.assert_array_equal(nulls_fast, nulls.ap_nulls(CONFS, 300, seed=4))
     frame = random_ap_frame(np.random.default_rng(0), n=50, n_groups=8)
     kwargs = dict(null_size=300, threshold=0.05, seed=4, progress_bar=False)
+    kwargs["null"] = "copied"
     default = mean_average_precision(frame, ["g"], cache_dir=tmp_path, **kwargs)
     fast = mean_average_precision(frame, ["g"], method="fast", **kwargs)
     pd.testing.assert_frame_equal(default, fast)
@@ -147,7 +152,14 @@ def test_map_fast_matches_brute_force(backend):
     tied = nulls.ap_nulls([[3, 10]], 1, seed=6, dtype=np.float64)[0, 0]
     frame.loc[:2, "average_precision"] = tied
     result = mean_average_precision(
-        frame, ["g"], 2000, 0.05, seed=6, progress_bar=False, backend=backend
+        frame,
+        ["g"],
+        2000,
+        0.05,
+        seed=6,
+        progress_bar=False,
+        null="copied",
+        backend=backend,
     )
     confs, rev_ix = np.unique(
         frame[["n_pos_pairs", "n_total_pairs"]].values, axis=0, return_inverse=True
@@ -179,8 +191,8 @@ def test_backends_identical_through_public_api():
     pytest.importorskip("numba")
     frame = random_ap_frame(np.random.default_rng(4))
     kwargs = dict(null_size=5000, threshold=0.05, seed=1, progress_bar=False)
-    a = mean_average_precision(frame, ["g"], backend="numpy", **kwargs)
-    b = mean_average_precision(frame, ["g"], backend="numba", **kwargs)
+    a = mean_average_precision(frame, ["g"], null="copied", backend="numpy", **kwargs)
+    b = mean_average_precision(frame, ["g"], null="copied", backend="numba", **kwargs)
     pd.testing.assert_frame_equal(a, b)
     confs = frame[["n_pos_pairs", "n_total_pairs"]].values
     ap = frame["average_precision"].to_numpy()
@@ -204,21 +216,24 @@ def perfect_retrieval_scores():
 
 
 def test_map_pvalue_counts_ties(tmp_path):
-    """An mAP equal to a null atom counts the atom under the fast method.
+    """An mAP equal to a null atom counts the atom under either method.
 
     Both members of a group share one AP draw, so P(mAP >= 1) = P(AP >= 1) =
-    1/100 and P(mAP >= 1/2) = 2/100. The legacy method counts ``>`` and gives
-    mAP = 1 the smallest possible p-value.
+    1/100 and P(mAP >= 1/2) = 2/100.
     """
     kwargs = dict(null_size=100_000, threshold=0.05, seed=0, progress_bar=False)
+    kwargs["null"] = "copied"
     expected = np.array([0.01, 0.02])
-    fast = mean_average_precision(perfect_retrieval_scores(), ["g"], **kwargs)
     se = np.sqrt(expected * (1 - expected) / kwargs["null_size"])
-    assert (np.abs(fast["p_value"].to_numpy() - expected) < 5 * se).all()
-    legacy = mean_average_precision(
-        perfect_retrieval_scores(), ["g"], cache_dir=tmp_path, method="legacy", **kwargs
-    )
-    assert legacy["p_value"].iloc[0] == pytest.approx(1 / 100_001)
+    for method in ("fast", "legacy"):
+        result = mean_average_precision(
+            perfect_retrieval_scores(),
+            ["g"],
+            cache_dir=tmp_path,
+            method=method,
+            **kwargs,
+        )
+        assert (np.abs(result["p_value"].to_numpy() - expected) < 5 * se).all()
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -244,7 +259,9 @@ def test_float32_scores_count_ties(backend):
             "n_total_pairs": 3,
         }
     )
-    fast = mean_average_precision(scores, ["g"], threshold=0.05, **kwargs)
+    fast = mean_average_precision(
+        scores, ["g"], threshold=0.05, null="copied", **kwargs
+    )
     assert fast["p_value"].iloc[0] == 1.0
     assert fast["mean_average_precision"].dtype == np.float32
 
@@ -274,7 +291,7 @@ def test_map_column_is_the_score(keys, monkeypatch):
         return np.ones(len(scores))
 
     monkeypatch.setattr(map_module, "_copied_pvalues", copied)
-    got = get_map_pvalue(frame, ["g"], 10, 0, progress_bar=False)
+    got = get_map_pvalue(frame, ["g"], 10, 0, progress_bar=False, null="copied")
     mean = frame.astype({"average_precision": np.float64}).groupby("g")
     expected = mean["average_precision"].mean().astype(np.float32)
     column = got.set_index("g")["mean_average_precision"]
@@ -304,7 +321,7 @@ def test_max_workers_sets_numpy_threads(backend, monkeypatch):
     runs = {
         "ap": lambda w: compute.p_values(scores, confs, max_workers=w, **kwargs),
         "map": lambda w: mean_average_precision(
-            frame, ["g"], threshold=0.05, max_workers=w, **kwargs
+            frame, ["g"], threshold=0.05, max_workers=w, null="copied", **kwargs
         )["p_value"].to_numpy(),
     }
     for name, run in runs.items():
@@ -335,6 +352,7 @@ def test_map_fast_vs_legacy(tmp_path):
     """Fast and legacy mAP p-values agree within Monte Carlo error."""
     frame = random_ap_frame(np.random.default_rng(3))
     kwargs = dict(null_size=20_000, threshold=0.05, seed=0, progress_bar=False)
+    kwargs["null"] = "copied"
     fast = mean_average_precision(frame, ["g"], **kwargs)
     legacy = mean_average_precision(
         frame, ["g"], cache_dir=tmp_path, method="legacy", **kwargs
@@ -365,7 +383,7 @@ def test_ap_fast_vs_legacy():
 def test_map_fast_independent_of_other_groups():
     """A group's fast mAP p-value does not depend on the other groups."""
     frame = random_ap_frame(np.random.default_rng(6), n=80, n_groups=6)
-    kwargs = dict(sameby=["g"], null_size=500, threshold=0.05, seed=0)
+    kwargs = dict(sameby=["g"], null_size=500, threshold=0.05, seed=0, null="copied")
     both = mean_average_precision(frame, progress_bar=False, **kwargs)
     only = frame[frame["g"] == both["g"].iloc[0]]
     alone = mean_average_precision(only, progress_bar=False, **kwargs)
@@ -415,17 +433,16 @@ def empty_ap_frame():
 @pytest.mark.parametrize("method", ["fast", "legacy"])
 @pytest.mark.parametrize("hierarchical", [False, True])
 def test_map_empty_input(method, hierarchical, tmp_path):
-    """No valid AP scores give an empty result with the usual columns."""
+    """No valid AP scores raise UnpairedException under either method."""
     empty = empty_ap_frame()
-    kwargs = dict(progress_bar=False, method=method, cache_dir=tmp_path)
-    if hierarchical:
-        result = mean_average_precision_hierarchical(
-            empty, ["g", "h"], 100, 0.05, 0, ["g"], **kwargs
-        )
-    else:
-        result = mean_average_precision(empty, ["g"], 100, 0.05, 0, **kwargs)
-    assert len(result) == 0
-    assert {"p_value", "corrected_p_value", "below_corrected_p"} <= set(result.columns)
+    kwargs = dict(progress_bar=False, null="copied", method=method, cache_dir=tmp_path)
+    with pytest.raises(UnpairedException):
+        if hierarchical:
+            mean_average_precision_hierarchical(
+                empty, ["g", "h"], 100, 0.05, 0, ["g"], **kwargs
+            )
+        else:
+            mean_average_precision(empty, ["g"], 100, 0.05, 0, **kwargs)
 
 
 @pytest.mark.parametrize("method", ["fast", "legacy"])
@@ -470,7 +487,9 @@ def test_empty_input_still_validates(bad, match):
         with pytest.raises(ValueError, match=match):
             compute.p_values(np.zeros(len(confs)), confs, **kwargs)
     with pytest.raises(ValueError, match=match):
-        mean_average_precision(empty_ap_frame(), ["g"], threshold=0.05, **kwargs)
+        mean_average_precision(
+            empty_ap_frame(), ["g"], threshold=0.05, null="copied", **kwargs
+        )
 
 
 def test_unknown_method():
@@ -483,7 +502,9 @@ def test_unknown_method():
     with pytest.raises(ValueError, match="unknown method"):
         frame_p_values(scores, 10, 0, method="exact")
     with pytest.raises(ValueError, match="unknown method"):
-        mean_average_precision(scores, ["g"], 10, 0.05, 0, method="exact")
+        mean_average_precision(
+            scores, ["g"], 10, 0.05, 0, null="copied", method="exact"
+        )
 
 
 @pytest.mark.parametrize("method", ["fast", "legacy"])
@@ -498,7 +519,14 @@ def test_unknown_backend(method, tmp_path):
         )
     with pytest.raises(ValueError, match="unknown backend"):
         mean_average_precision(
-            perfect_retrieval_scores(), ["g"], 10, 0.05, 0, method=method, backend="x"
+            perfect_retrieval_scores(),
+            ["g"],
+            10,
+            0.05,
+            0,
+            null="copied",
+            method=method,
+            backend="x",
         )
 
 
@@ -511,7 +539,15 @@ def test_numba_backend_without_numba_names_the_extra():
         compute.p_values(np.array([]), np.empty((0, 2)), 10, 0, backend="numba")
     with pytest.raises(ImportError, match=r"copairs\[numba\]"):
         mean_average_precision(
-            perfect_retrieval_scores(), ["g"], 10, 0.05, 0, backend="numba"
+            perfect_retrieval_scores(),
+            ["g"],
+            10,
+            0.05,
+            0,
+            null="copied",
+            backend="numba",
         )
     with pytest.raises(ImportError, match=r"copairs\[numba\]"):
-        mean_average_precision(empty_ap_frame(), ["g"], 10, 0.05, 0, backend="numba")
+        mean_average_precision(
+            empty_ap_frame(), ["g"], 10, 0.05, 0, null="copied", backend="numba"
+        )

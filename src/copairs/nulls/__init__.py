@@ -3,6 +3,8 @@
 :mod:`copairs.nulls.philox` generates every draw as a pure function of a seed and
 a counter, so a draw does not depend on which other draws are computed, or in
 which order. :mod:`copairs.nulls.common` holds the helpers the nulls share.
+:mod:`copairs.nulls.joint` and :mod:`copairs.nulls.permutation` are the joint and
+label-permutation mAP nulls, which run on NumPy.
 
 :mod:`copairs.nulls.sampler` samples AP nulls exactly, and
 :mod:`copairs.nulls.pvalues` streams AP and mAP p-values against them in
@@ -11,6 +13,8 @@ bounded memory. Backends: ``"numba"`` (optional, ``pip install
 when it is installed.
 """
 
+from copairs.nulls import joint, permutation
+from copairs.nulls.joint import joint_pvalues
 from copairs.nulls.common import TIE_TOL, tie_thresholds
 from copairs.nulls.backend import resolve_backend, available_backends
 from copairs.nulls.pvalues import ap_pvalues, map_pvalues
@@ -21,7 +25,10 @@ __all__ = [
     "ap_nulls",
     "ap_pvalues",
     "available_backends",
+    "joint",
+    "joint_pvalues",
     "map_pvalues",
+    "permutation",
     "resolve_backend",
     "tie_thresholds",
 ]
