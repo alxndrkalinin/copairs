@@ -1,7 +1,7 @@
 """Helper functions for testing."""
 
 from typing import Dict
-from itertools import product
+from itertools import product, combinations
 
 import numpy as np
 import pandas as pd
@@ -78,6 +78,12 @@ def create_dframe(n_options, n_rows):
     dframe = pd.DataFrame((product(colc, colp, colw)), columns=list("cpw"))
     dframe = dframe.sample(n_rows, random_state=SEED).reset_index(drop=True)
     return dframe
+
+
+def exact_ap_null(num_pos, total):
+    """Every AP value of a (num_pos, total) rank list, one per placement of positives."""
+    ranks = np.array(list(combinations(range(1, total + 1), num_pos)))
+    return (np.arange(1, num_pos + 1) / ranks).sum(axis=1) / num_pos
 
 
 def brute_ap_pvalues(scores, conf_ix, confs, null_size, seed):

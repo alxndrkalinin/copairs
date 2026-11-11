@@ -15,7 +15,12 @@ from copairs.map import (
     mean_average_precision_hierarchical,
 )
 from copairs.nulls import sampler
-from tests.helpers import brute_ap_pvalues, brute_map_pvalues
+from tests.helpers import (
+    ap_frame,
+    exact_ap_null,
+    brute_ap_pvalues,
+    brute_map_pvalues,
+)
 from copairs.matching import UnpairedException
 from copairs.map.normalization import expected_ap
 from copairs.map.average_precision import p_values as frame_p_values
@@ -132,6 +137,92 @@ def test_copied_map_matches_brute_force(backend):
     tied_p = result.set_index("g").loc["tied", "p_value"]
     null = nulls.ap_nulls([[3, 10]], 2000, seed=6, dtype=np.float64)[0]
     assert tied_p > ((null > tied).sum() + 1) / 2001
+
+
+def exact_group_null(members):
+    """Every value of a group's copied null, one per equally likely placement.
+
+    ``members`` maps each configuration to its number of members. Members with
+    equal configurations share one AP draw, and distinct configurations draw
+    independently, so the null is the members' weighted mean over every
+    combination of the configurations' placements of positives.
+    """
+    values, weights = np.zeros(1), 0
+    for conf, count in members.items():
+        values = (values[:, None] + count * exact_ap_null(*conf)[None, :]).ravel()
+        weights += count
+    return values / weights
+
+
+def tail_scores(null):
+    """Scores on four atoms of ``null`` and one between its two largest.
+
+    The atoms are the median, 90th-percentile, second-largest and largest.
+    """
+    atoms = np.unique(np.round(null, 12))
+    picks = atoms[[len(atoms) // 2, int(0.9 * len(atoms)), -2, -1]]
+    return [*picks, (atoms[-2] + atoms[-1]) / 2]
+
+
+def assert_estimates(got, exact, null_size):
+    """Assert Monte Carlo p-values ``(hits + 1) / (draws + 1)`` estimate ``exact``."""
+    got, exact = np.asarray(got, dtype=np.float64), np.asarray(exact)
+    mean = (null_size * exact + 1) / (null_size + 1)
+    se = np.sqrt(exact * (1 - exact) / null_size)
+    assert (np.abs(got - mean) <= 5 * se + 1e-7).all(), np.c_[got, mean, se]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_ap_pvalues_match_exact_null(backend):
+    """AP p-values estimate P(AP >= score) under the exact AP null.
+
+    Small configurations are enumerated. Scores on an atom count its mass, and
+    scores between atoms do not.
+    """
+    scores, confs, exact = [], [], []
+    for conf in [(1, 5), (2, 6), (3, 8), (2, 10)]:
+        null = exact_ap_null(*conf)
+        for score in tail_scores(null):
+            scores.append(score)
+            confs.append(conf)
+            exact.append(np.mean(null >= nulls.tie_thresholds(score)))
+    got = compute.p_values(
+        np.array(scores), np.array(confs), 50_000, 3, False, backend=backend
+    )
+    assert_estimates(got, exact, 50_000)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_copied_map_pvalues_match_exact_null(backend):
+    """Copied mAP p-values estimate P(mAP >= score) under the exact copied null.
+
+    Groups of members sharing one configuration keep that configuration's AP
+    null; groups mixing configurations average independent draws, weighted by
+    their member counts.
+    """
+    designs = {
+        "shared": {(2, 6): 3},
+        "pair": {(1, 5): 1, (2, 6): 1},
+        "weighted": {(1, 5): 2, (3, 8): 1},
+    }
+    rows, exact = [], {}
+    for name, members in designs.items():
+        null = exact_group_null(members)
+        for k, score in enumerate(tail_scores(null)):
+            exact[f"{name}{k}"] = np.mean(null >= nulls.tie_thresholds(score))
+            for (num_pos, total), count in members.items():
+                rows += [(f"{name}{k}", score, num_pos, total)] * count
+    result = mean_average_precision(
+        ap_frame(rows),
+        ["g"],
+        50_000,
+        0.05,
+        seed=3,
+        progress_bar=False,
+        null="copied",
+        backend=backend,
+    ).set_index("g")
+    assert_estimates(result.loc[list(exact), "p_value"], list(exact.values()), 50_000)
 
 
 def test_backends_identical_through_public_api():
