@@ -188,8 +188,9 @@ def test_auto_looks_for_numba_once(monkeypatch):
         return find_spec(name, *args)
 
     monkeypatch.setattr(importlib.util, "find_spec", recorded)
+    auto = [b for b in BACKENDS if b != "cuda"][0]  # "auto" never picks the GPU
     for _ in range(3):
-        assert nulls.resolve_backend("auto") == BACKENDS[0]
+        assert nulls.resolve_backend("auto") == auto
         assert nulls.available_backends() == BACKENDS
     assert looked == []
 
