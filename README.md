@@ -26,38 +26,29 @@ To also install dependencies for running examples, run:
 pip install copairs[demo]
 ```
 
-#### Null distributions and the optional Numba backend
+#### AP nulls and the optional Numba backend
 
-The AP and mAP p-value functions (`compute.p_values`,
-`map.average_precision.p_values`, `mean_average_precision`,
-`mean_average_precision_hierarchical` and `get_map_pvalue`) take
-`method="fast"` (default) or `"legacy"`, the sampler of the AP nulls (in the
-mAP functions, those of `null="copied"`), and a `backend`:
+The AP p-value functions (`compute.p_values`, `map.average_precision.p_values`)
+and the copied mAP null (`null="copied"` in `mean_average_precision`,
+`mean_average_precision_hierarchical` and `get_map_pvalue`) sample each AP null
+exactly (Philox counter-based RNG, Vitter's Algorithm A) in O(1) memory per
+sample, instead of permuting a `null_size x total` matrix, and stream p-values
+in bounded memory without a disk cache. Sample `j` of a `(num_pos, total)` null
+depends only on `(seed, num_pos, total, j)`, with `seed` in `[0, 2**64)`.
 
-- `"fast"` samples each AP null exactly (Philox counter-based RNG, Vitter's
-  Algorithm A) in O(1) memory per sample, instead of permuting a
-  `null_size x total` matrix, and streams p-values in bounded memory without a
-  disk cache. Sample `j` of a `(num_pos, total)` null depends only on
-  `(seed, num_pos, total, j)`, with `seed` in `[0, 2**64)`.
-- `"legacy"` is copairs 0.5.5's null, seeded per configuration and cached
-  under `cache_dir` (default `~/.copairs`).
-- The fast method's null samples come from a different random stream, so
-  p-values agree with `"legacy"` within Monte Carlo error. Both count null
-  values `>=` the observed score, within the tolerance described under
-  [numerical policy](#numerical-policy-and-reproducibility).
-- With the NumPy backend, `"fast"` can be slower than `"legacy"` for
-  configurations with many positives at small null sizes (for 1000 positives
-  among 100,000 pairs at `null_size=1000`, 3.6 s against 1.6 s; 0.02 s with
-  Numba), so install the `numba` extra for such data.
-
-`backend="numpy"` needs nothing extra. `backend="numba"` compiles the same
-code with [Numba](https://numba.pydata.org), an optional dependency:
+They take a `backend`. `backend="numpy"` needs nothing extra.
+`backend="numba"` compiles the same code with [Numba](https://numba.pydata.org),
+an optional dependency:
 ```bash
 pip install copairs[numba]
 ```
 The two backends return bitwise-identical nulls and p-values, so
 `backend="auto"` (default) uses Numba whenever it is installed; if Numba fails
-to import, `"auto"` warns once and uses NumPy.
+to import, `"auto"` warns once and uses NumPy. The NumPy backend places the
+positives one at a time, so it is slow for configurations with many positives
+at small null sizes (for 1000 positives among 100,000 pairs at
+`null_size=1000`, 3.6 s against 0.02 s with Numba); install the `numba` extra
+for such data.
 
 Numba starts one thread per host CPU. In a container or job with a CPU quota,
 set `NUMBA_NUM_THREADS` to the quota, or kernels oversubscribe the CPUs. The
@@ -165,7 +156,9 @@ assumptions; calibration depends on the experimental design.
 - `"copied"` retains the earlier statistical model: each member's AP null is
   sampled per `(n_pos_pairs, n_total_pairs)` configuration and the group's
   null averages them, so members with equal pair counts share one draw and
-  the null does not narrow with replicates. AP-draw caching remains supported.
+  the null does not narrow with replicates. Its AP draws are sampled exactly
+  and streamed, without a cache (see
+  [AP nulls](#ap-nulls-and-the-optional-numba-backend)).
 
 ### Multilabel component permutation
 
@@ -199,14 +192,13 @@ insufficient. Use `neg_sameby` to separate plate or batch structure where needed
 [migration notes](docs/migration-0.6.0.md) for API and numerical changes.
 
 - Public mAP functions default to `seed=0`; explicit `None` resolves fresh entropy
-  once per run. Joint/permutation seeds must be integers in `[0, 2**64)`;
-  copied accepts any non-negative integer. Fresh copied runs are not cached.
+  once per run. Seeds must be integers in `[0, 2**64)`.
 - With fixed inputs, row identities, seed and software environment, worker counts
   and computation chunks do not change draws/results.
 - Means accumulate in float64 and are reported in the AP dtype. A null value
   counts when `null >= score - tol`, with
-  `tol = max(1e-10, 8 * eps(AP dtype) * abs(score))`; copied also accounts for
-  its float32 AP draws. Closely spaced distinct values can fall within this tolerance.
+  `tol = max(1e-10, 8 * eps(AP dtype) * abs(score))`. Closely spaced distinct
+  values can fall within this tolerance.
 - Positive draw counts use Monte Carlo `(hits + 1)/(draws + 1)`, with minimum
   sampled p-value `1/(draws + 1)`. There is no automatic exact enumeration or
   adaptive stopping; all requested draws run.
@@ -243,9 +235,10 @@ temporary arrays need additional memory. Per-call settings leave global limits
 unchanged.
 
 `max_workers` controls permutation group work and shared-key construction, plus
-copied p-value evaluation. It does not control joint sampling, DuckDB, the original
-AP similarity thread pool, or BLAS/internal library threads. Computation remains
-NumPy-first; acceleration and persistent joint/permutation caches are separate work.
+the copied null's NumPy sampler threads. It does not control joint sampling, DuckDB,
+the original AP similarity thread pool, Numba's threads, or BLAS/internal library
+threads. Joint and permutation sampling runs on NumPy; their acceleration and
+persistent caches are separate work.
 
 ## Citation
 If you find this work useful for your research, please cite our [paper](https://doi.org/10.1038/s41467-025-60306-2):
