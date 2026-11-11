@@ -388,12 +388,13 @@ def test_map_pvalues_match_brute_force(backend, budget):
 
 
 def test_backend_validation():
-    """Unknown backends raise ValueError (unknown methods: test_unknown_method)."""
+    """Unknown backends raise ValueError; known names pass, installed or not."""
     with pytest.raises(ValueError, match="unknown backend"):
         nulls.resolve_backend("tpu")
     with pytest.raises(ValueError, match="unknown backend"):
         nulls.ap_nulls(CONFS, 4, seed=0, backend="cuda")
-    backend.check_method("legacy", "numba")  # valid names, whether installed or not
+    for name in backend.BACKENDS:
+        backend.check_backend(name)
 
 
 def test_ap_pvalues_validates_conf_ix():

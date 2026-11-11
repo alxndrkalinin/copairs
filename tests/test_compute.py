@@ -1,8 +1,5 @@
 """Test pairwise distance calculation functions."""
 
-import tempfile
-from pathlib import Path
-
 import numpy as np
 import pytest
 from scipy.spatial.distance import cdist
@@ -203,107 +200,27 @@ def test_hamming():
     assert np.allclose(hamming_gt, hamming)
 
 
-def test_null_dist_cached():
-    """Test that null_dist_cached creates and uses cache."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache_dir = Path(tmpdir)
-
-        null_dist = compute.null_dist_cached(
-            num_pos=5, total=20, seed=42, null_size=100, cache_dir=cache_dir
-        )
-
-        assert len(null_dist) == 100
-        assert np.all(null_dist >= 0)
-        assert np.all(null_dist <= 1)
-
-        # Cache stores one .npy file per (total, num_pos, seed) triple
-        npy_files = list(cache_dir.glob("*.npy"))
-        assert len(npy_files) == 1
-        assert npy_files[0].name == "n20_k5_s42.npy"
-
-
-def test_null_dist_cached_hit():
-    """Test that null_dist_cached returns consistent results on cache hit."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache_dir = Path(tmpdir)
-        kwargs = dict(num_pos=5, total=20, seed=42, null_size=100, cache_dir=cache_dir)
-
-        first = compute.null_dist_cached(**kwargs)
-        second = compute.null_dist_cached(**kwargs)
-        assert np.array_equal(first, second)
-
-
-def test_null_dist_cached_corrupt():
-    """Test that a corrupted cache file is regenerated, not propagated."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache_dir = Path(tmpdir)
-        path = cache_dir / "n20_k5_s42.npy"
-
-        # Write garbage to simulate corruption
-        path.write_bytes(b"not a valid npy file")
-
-        null_dist = compute.null_dist_cached(
-            num_pos=5, total=20, seed=42, null_size=100, cache_dir=cache_dir
-        )
-        assert len(null_dist) == 100
-        assert np.all(null_dist >= 0)
-        assert np.all(null_dist <= 1)
-
-
-def _parallel_worker(args):
-    """Worker for parallel cache stress test."""
-    cache_dir, num_pos, total, seed, null_size = args
-    return compute.null_dist_cached(num_pos, total, seed, null_size, Path(cache_dir))
-
-
-def test_null_dist_cached_parallel():
-    """Test that parallel workers don't corrupt the cache.
-
-    Spawns 16 workers all racing on the same cache key.
-    """
-    from multiprocessing import Pool
-
-    num_pos, total, seed, null_size = 5, 100, 42, 10_000
-    n_workers = 16
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        args = [(tmpdir, num_pos, total, seed, null_size)] * n_workers
-
-        with Pool(n_workers) as pool:
-            results = pool.map(_parallel_worker, args)
-
-        # All workers should return identical results
-        for r in results:
-            assert np.array_equal(results[0], r)
-
-
-def test_get_null_dists_empty(tmp_path):
+def test_get_null_dists_empty():
     """No configurations give an empty array of null distributions."""
     confs = np.empty((0, 2), dtype=int)
-    null_dists = compute.get_null_dists(
-        confs, 100, seed=0, cache_dir=tmp_path, progress_bar=False
-    )
+    null_dists = compute.get_null_dists(confs, 100, seed=0, progress_bar=False)
     assert null_dists.shape == (0, 100)
 
 
-def test_p_values_empty(tmp_path, monkeypatch):
+def test_p_values_empty():
     """No AP scores give no p-values."""
-    # p_values has no cache_dir argument; keep the default cache out of ~/.copairs
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pvals = compute.p_values(
         np.array([]), np.empty((0, 2), dtype=int), 100, 0, progress_bar=False
     )
     assert len(pvals) == 0
 
 
-def test_get_null_dists_unseeded_skips_cache(tmp_path):
-    """Unseeded nulls are fresh draws and are never written to the cache."""
+def test_get_null_dists_unseeded():
+    """Unseeded nulls are fresh draws."""
     confs = np.array([[3, 20], [5, 30]])
-    kwargs = dict(null_size=200, seed=None, cache_dir=tmp_path, progress_bar=False)
-    kwargs["method"] = "legacy"  # the method that caches
+    kwargs = dict(null_size=200, seed=None, progress_bar=False)
     first = compute.get_null_dists(confs, **kwargs)
     second = compute.get_null_dists(confs, **kwargs)
-    assert list(tmp_path.rglob("*.npy")) == []
     assert not np.array_equal(first, second)
 
 

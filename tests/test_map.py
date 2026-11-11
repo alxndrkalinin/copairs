@@ -26,60 +26,6 @@ from copairs.map.average_precision import attached_pairs
 SEED = 0
 
 
-def binary2indices(arr: np.ndarray) -> np.ndarray:
-    """Convert a binary matrix to a list of indices."""
-    return np.nonzero(arr)[1].reshape(arr.shape[0], -1)
-
-
-def test_random_binary_matrix():
-    """Test the random binary matrix generation."""
-    rng = np.random.default_rng(SEED)
-
-    # Test with n=3, m=4, k=2
-    indices = compute.random_binary_matrix(3, 4, 2, rng)
-    assert indices.shape == (3, 2)
-    assert np.all(indices < 4)
-    assert np.all(indices >= 0)
-    assert np.unique(indices, axis=1).shape == indices.shape
-
-    # Test with n=5, m=6, k=3
-    indices = compute.random_binary_matrix(5, 6, 3, rng)
-    assert indices.shape == (5, 3)
-    assert np.all(indices < 6)
-    assert np.all(indices >= 0)
-    assert np.unique(indices, axis=1).shape == indices.shape
-
-
-def test_compute_ap():
-    """Test the average precision computation."""
-    num_pos, num_neg, num_perm = 5, 6, 100
-    total = num_pos + num_neg
-
-    y_true = np.zeros((num_perm, total), dtype=int)
-    y_true[:, :num_pos] = 1
-    y_pred = np.random.uniform(0, 1, [num_perm, total])
-    df = pd.DataFrame(
-        {
-            "y_true": y_true.tolist(),
-            "y_pred": y_pred.tolist(),
-        }
-    )
-    rel_k = (
-        df["y_pred"]
-        .apply(lambda x: np.argsort(x)[::-1])
-        .apply(lambda x: np.array(df.y_true[0])[x])
-    )
-    rel_k = np.stack(rel_k)
-
-    ap = compute.average_precision(binary2indices(rel_k))
-
-    ap_sklearn = df.apply(
-        lambda x: average_precision_score(x["y_true"], x["y_pred"]), axis=1
-    )
-
-    assert np.allclose(ap_sklearn, ap)
-
-
 def test_compute_ap_contiguous():
     """Test the contiguous average precision computation."""
     num_pos_range = [2, 9]
@@ -325,8 +271,8 @@ def test_multilabel_profile_without_negatives(labels, plates, feats, no_neg_ix):
     )
 
 
-def test_mean_average_precision_independent_of_other_groups(tmp_path):
-    """A group's mAP p-value depends neither on the other groups nor on the cache."""
+def test_mean_average_precision_independent_of_other_groups():
+    """A group's copied mAP p-value does not depend on the other groups."""
     ap_scores = pd.DataFrame(
         {
             "group": ["X", "X", "Y", "Y"],
@@ -343,18 +289,10 @@ def test_mean_average_precision_independent_of_other_groups(tmp_path):
         threshold=0.05,
         seed=0,
         progress_bar=False,
-        null="copied",  # the cache belongs to the copied null
+        null="copied",
     )
-    kwargs["method"] = "legacy"  # the method that caches
-    shared = tmp_path / "shared"
-    both = mean_average_precision(ap_scores, cache_dir=shared, **kwargs)
-    cached = list(shared.rglob("*.npy"))
-    after_both = mean_average_precision(only_y, cache_dir=shared, **kwargs)
-    alone = mean_average_precision(only_y, cache_dir=tmp_path / "fresh", **kwargs)
-
-    # The second run reads Y's null from the first run's cache.
-    assert sorted(shared.rglob("*.npy")) == sorted(cached)
-    pd.testing.assert_frame_equal(after_both, alone)
+    both = mean_average_precision(ap_scores, **kwargs)
+    alone = mean_average_precision(only_y, **kwargs)
     y_in_both = both.loc[both["group"] == "Y", "p_value"].tolist()
     assert y_in_both == alone["p_value"].tolist()
 
@@ -406,7 +344,7 @@ def test_map_pvalue_narrows_with_group_size():
     assert p["n2"] > p["n4"] > p["n8"]
 
 
-def test_map_pvalue_requires_explicit_copied_selection(tmp_path, monkeypatch):
+def test_map_pvalue_requires_explicit_copied_selection(monkeypatch):
     """Missing graphs raise without invoking copied sampling; explicit copied works."""
     rows = [("odd", 0.3, 10, 50)] * 3 + [("rep", 0.3, 2, 52)] * 3
 
@@ -422,7 +360,6 @@ def test_map_pvalue_requires_explicit_copied_selection(tmp_path, monkeypatch):
                 1000,
                 SEED,
                 progress_bar=False,
-                cache_dir=tmp_path,
                 null="joint",
             )
     result = get_map_pvalue(
@@ -431,7 +368,6 @@ def test_map_pvalue_requires_explicit_copied_selection(tmp_path, monkeypatch):
         1000,
         SEED,
         progress_bar=False,
-        cache_dir=tmp_path,
         null="copied",
     )
     p = result.set_index("g")["p_value"]
@@ -626,17 +562,17 @@ def run_map_entry(ap_scores, hierarchical, **kwargs):
 
 @pytest.mark.parametrize("hierarchical", [False, True])
 @pytest.mark.parametrize("null", ["permutation", "joint", "copied"])
-def test_no_valid_ap_scores_raise_under_every_null(null, hierarchical, tmp_path):
+def test_no_valid_ap_scores_raise_under_every_null(null, hierarchical):
     """AP frames with no valid AP score or group key raise, with their pairs attached."""
     meta = query_meta()
     feats = np.random.default_rng(SEED).standard_normal((len(meta), 10))
     ap = average_precision(meta, feats, ["g"], [], [], ["g"], progress_bar=False)
     for frame in (ap.iloc[:0], ap.assign(average_precision=np.nan), ap.assign(g=None)):
         with pytest.raises(UnpairedException, match="valid AP scores"):
-            run_map_entry(frame, hierarchical, null=null, cache_dir=tmp_path)
+            run_map_entry(frame, hierarchical, null=null)
 
 
-def test_indices_keep_rows_without_sameby_values(tmp_path):
+def test_indices_keep_rows_without_sameby_values():
     """`indices` count rows missing a sameby value; only invalid APs are dropped."""
     ap = ap_frame(
         [
@@ -655,7 +591,6 @@ def test_indices_keep_rows_without_sameby_values(tmp_path):
         SEED,
         progress_bar=False,
         null="copied",
-        cache_dir=tmp_path,
     )
     assert result.set_index("g")["indices"].to_dict() == {"a": [1], "b": [2]}
 

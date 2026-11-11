@@ -1,4 +1,4 @@
-"""Method and backend choices of the AP null sampler and p-values.
+"""Backend choices of the AP null sampler and p-values.
 
 Numba is optional (``pip install 'copairs[numba]'``). Nothing here imports it
 at module level: :func:`_import_numba_backend` loads the compiled kernels the
@@ -9,25 +9,13 @@ import warnings
 import importlib.util
 from functools import cache
 
-METHODS = ("fast", "legacy")
 BACKENDS = ("auto", "numba", "numpy")
 
 
-def _check_backend(backend: str) -> None:
+def check_backend(backend: str) -> None:
     """Raise ValueError unless ``backend`` names a known backend."""
     if backend not in BACKENDS:
         raise ValueError(f"unknown backend {backend!r}; expected one of {BACKENDS}")
-
-
-def check_method(method: str, backend: str = "auto") -> None:
-    """Raise ValueError unless ``method`` and ``backend`` name known choices.
-
-    The backend name is checked under ``method="legacy"`` too, which ignores
-    it, so a misspelled backend fails whichever method is used.
-    """
-    if method not in METHODS:
-        raise ValueError(f"unknown method {method!r}; expected one of {METHODS}")
-    _check_backend(backend)
 
 
 def available_backends() -> list[str]:
@@ -65,7 +53,7 @@ def resolve_backend(backend: str) -> str:
     That choice cannot change results: both backends return bitwise-identical
     null samples and counts (tested). ``"numba"`` raises if it cannot import.
     """
-    _check_backend(backend)
+    check_backend(backend)
     if backend == "auto":
         return available_backends()[0]
     if backend == "numba":

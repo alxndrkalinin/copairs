@@ -361,7 +361,6 @@ def p_values(
     null_size: int,
     seed: int,
     progress_bar: bool = True,
-    method: str = "fast",
     backend: str = "auto",
 ) -> np.ndarray:
     """Compute p-values for average precision scores based on a null distribution.
@@ -380,15 +379,13 @@ def p_values(
         - `n_total_pairs`: Total number of pairs (positive + negative) for each profile.
     null_size : int
         The number of samples to generate in the null distribution for significance testing.
-    seed : int
-        Random seed for reproducibility of the null distribution.
+    seed : int or None
+        Random seed of the null distribution, an integer in ``[0, 2**64)``,
+        see :func:`copairs.compute.p_values`.
     progress_bar : bool
         Whether or not to show tqdm's progress bar.
-    method : str
-        ``"fast"`` (default) or ``"legacy"`` null sampler, see
-        :func:`copairs.compute.p_values`.
     backend : str
-        Backend of the fast method: ``"auto"`` (default), ``"numba"`` or
+        Backend of the null sampler: ``"auto"`` (default), ``"numba"`` or
         ``"numpy"``, all with identical results.
 
     Returns
@@ -409,7 +406,7 @@ def p_values(
 
     # Compute p-values for profiles with valid configurations using the null distribution
     pvals[mask] = compute.p_values(
-        scores, null_confs, null_size, seed, progress_bar, method, backend
+        scores, null_confs, null_size, seed, progress_bar, backend
     )
 
     # Return the array of p-values, including NaN for invalid profiles
