@@ -205,14 +205,16 @@ unchanged.
 `max_workers` controls permutation group work and shared-key construction, plus
 copied p-value evaluation. It does not control joint sampling, DuckDB, the original
 AP similarity thread pool, or BLAS/internal library threads. Computation remains
-NumPy-first; acceleration and persistent joint/permutation caches are separate work.
+NumPy-first: the optional Numba backend ([Performance](#performance)) covers the
+AP stage only; null acceleration and persistent joint/permutation caches are
+separate work.
 
 ## Performance
 
 `map.average_precision`, `map.multilabel.average_precision`,
 `matching.find_pairs_multilabel` and `map.normalization.normalize_ap` take
 `backend="numpy"` (default) or `"numba"`. `"numpy"` has no optional
-dependencies and gives the results of copairs <= 0.5.5. `"numba"` needs the
+dependencies and gives the APs of earlier copairs releases. `"numba"` needs the
 `numba` extra, which is imported only when requested:
 
 ```python
@@ -234,7 +236,10 @@ Given the same similarities, APs agree with `"numpy"` to float64 rounding, and
 normalized APs bit for bit. The kernels' similarities match the NumPy ones to
 float32 rounding, so near-tied pairs can rank differently. They compute in
 float64, so float32 profiles whose norms overflow float32 (entries around 1e19
-and up) get their actual similarity instead of 0 or NaN.
+and up) get their actual similarity instead of 0 or NaN. The pairs a Numba AP
+stage attaches recompute similarities with the same kernels (on the null's
+threads, serially, with the same bits), so `null="permutation"` ranks pairs as
+the APs did; the kernel's copy of the features lives for one null.
 
 Numba starts one thread per host CPU. In a container or job with a CPU quota,
 set `NUMBA_NUM_THREADS` to the quota, or kernels oversubscribe the CPUs. If

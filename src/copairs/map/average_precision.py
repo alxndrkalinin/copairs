@@ -317,7 +317,7 @@ def average_precision(
 
     backend : {"numpy", "numba"}
         The default ``"numpy"`` has no optional dependencies and gives the
-        results of copairs <= 0.5.5. ``"numba"`` (install
+        APs of earlier copairs releases. ``"numba"`` (install
         ``copairs[numba]``) computes similarities with parallel kernels for
         cosine, abs_cosine, correlation, euclidean, manhattan and chebyshev
         (other distances use the NumPy functions), AP by counting the negatives
