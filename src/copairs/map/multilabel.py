@@ -163,6 +163,7 @@ def average_precision(
 
     logger.info("Finding negative pairs...")
     neg_pairs = find_pairs(neg_sameby, neg_diffby)
+    del find_pairs  # Release the shared label index after matching.
     if len(neg_pairs) == 0:
         raise UnpairedException("Unable to find any negative pairs.")
 
