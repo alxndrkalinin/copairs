@@ -125,8 +125,8 @@ def draw_average_precisions(
     np.ndarray
         ``(n_draws, k)`` float64 APs.
     """
-    queries = np.asarray(queries, dtype=np.int64)
-    references = np.asarray(references, dtype=np.int64)
+    queries = np.asarray(queries)
+    references = np.asarray(references)
     if queries.ndim != 2 or references.ndim != 2 or len(queries) != len(references):
         raise ValueError("queries and references must be (n_draws, k) and (n_draws, m)")
     n_draws, k = queries.shape
@@ -134,11 +134,18 @@ def draw_average_precisions(
     if k < 2:
         raise ValueError(f"need at least 2 queries per draw, got {k}")
     for idx in (queries, references):
-        if idx.size and (idx.min() < 0 or idx.max() >= len(feats)):
+        if not idx.size:
+            continue
+        if idx.dtype.kind not in "iu":
+            raise ValueError("queries and references must contain integer row indices")
+        if idx.min() < 0 or int(idx.max()) >= len(feats):
             raise ValueError(f"indices must address the {len(feats)} rows of feats")
     feats = np.asarray(feats)
     step = _chunk(n_draws, k, m, feats.shape[1], budget_bytes)
-    idx = np.concatenate([queries, references], axis=1)
+    # Validated indices fit int64. Empty inputs may have NumPy's default dtype.
+    idx = np.concatenate(
+        [queries, references], axis=1, dtype=np.int64, casting="unsafe"
+    )
     feats, idx = _drawn_rows(feats, idx)
     x = unit_rows(feats, normalized)
     out = np.empty((n_draws, k), dtype=np.float64)

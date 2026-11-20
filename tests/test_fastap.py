@@ -425,6 +425,24 @@ def test_draw_average_precisions_index_range(bad):
         fastap.draw_average_precisions(feats, [[0, 1]], [[2, bad]])
 
 
+@pytest.mark.parametrize("bad", [-0.5, 1.5])
+def test_draw_average_precisions_requires_integer_indices(bad):
+    """The draw path rejects fractional indices instead of rounding them."""
+    feats = np.eye(4, dtype=np.float32)
+    with pytest.raises(ValueError, match="integer row indices"):
+        fastap.draw_average_precisions(feats, [[0, bad]], [[2, 3]])
+    with pytest.raises(ValueError, match="integer row indices"):
+        fastap.draw_average_precisions(feats, [[0, 1]], [[2, bad]])
+
+
+def test_draw_average_precisions_accepts_empty_reference_lists():
+    """Empty reference lists need no dtype, and unsigned queries stay valid."""
+    feats = np.eye(2, dtype=np.float32)
+    queries = np.array([[0, 1], [1, 0]], dtype=np.uint64)
+    got = fastap.draw_average_precisions(feats, queries, [[], []])
+    np.testing.assert_array_equal(got, [[1.0, 1.0], [1.0, 1.0]])
+
+
 def test_draw_average_precisions_budget_for_one_draw():
     """One draw fits exactly at the combined feature and similarity size."""
     feats = np.eye(4, dtype=np.float32)
