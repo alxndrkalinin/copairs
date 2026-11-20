@@ -5,8 +5,8 @@ so their cost is the number of such pairs. Pairs that share no label are all
 other candidate pairs; candidates are every pair, or the monolabel pairs of
 the remaining ``sameby``/``diffby`` columns. Rows whose labels cannot be
 indexed exactly (missing values inside lists, duplicate labels in a row,
-mixed label types, a non-default index) return None so callers can fall back
-to the SQL implementation.
+mixed label types, a non-default index), or whose index would generate too
+many pairs, return None so callers can fall back to SQL.
 """
 
 import numba
@@ -26,6 +26,9 @@ from copairs.fastap.ranking import (
     sortable_keys,
     ap_from_counts,
 )
+
+# Cap the eager label expansion and its per-pair temporary buffers.
+_MAX_INDEXED_LABEL_PAIRS = 2**22
 
 
 def label_members(labels: pd.Series):
@@ -82,9 +85,11 @@ def _in_sorted(keys, sorted_keys):
 
 
 def multilabel_pairs(dframe, multilabel_col):
-    """``(keys, pairs, label)`` of rows sharing each label, or None if unsupported.
+    """``(keys, pairs, label)`` of rows sharing each label, or None for SQL.
 
-    Pairs are grouped by label (see :func:`_label_pairs`).
+    Pairs are grouped by label (see :func:`_label_pairs`). A dense index can
+    generate many more pairs than the matching rules need. Use SQL before
+    allocating the expansion when it would exceed the cap.
     """
     if not dframe.index.equals(pd.RangeIndex(len(dframe))):
         return None
@@ -92,6 +97,9 @@ def multilabel_pairs(dframe, multilabel_col):
     if members is None:
         return None
     keys, ptr, rows = members
+    sizes = map(int, np.diff(ptr))
+    if sum(size * (size - 1) // 2 for size in sizes) > _MAX_INDEXED_LABEL_PAIRS:
+        return None
     pairs, label = _label_pairs(ptr, rows)
     return keys, pairs, label
 

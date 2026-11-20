@@ -568,8 +568,10 @@ def find_pairs_multilabel(
         ``"numpy"`` (default) matches in DuckDB SQL. ``"numba"`` (install
         ``copairs[numba]``) enumerates pairs through an inverted label index
         when the input allows it (a DataFrame with a default index, list cells
-        without missing or repeated labels, one label type), and uses SQL
-        otherwise. Both find the same pairs, possibly in a different order.
+        without missing or repeated labels, one label type, and a bounded
+        number of shared-label pairs), and uses SQL otherwise. The bound
+        limits the index's eager expansion. Matching results can still be
+        large. Both backends find the same pairs, possibly in a different order.
 
     Returns
     -------
@@ -611,7 +613,13 @@ def _multilabel_matcher(dframe, multilabel_col: str, fastap=None):
         if set(sameby).difference([multilabel_col]).intersection(diffby):
             raise ValueError("sameby and diffby must be disjoint lists")
         if found is None:
-            return _find_pairs_multilabel_sql(dframe, sameby, diffby, multilabel_col)
+            return _find_pairs_multilabel_sql(
+                dframe,
+                sameby,
+                diffby,
+                multilabel_col,
+                candidate_first=fastap is not None,
+            )
         return fastap.multilabel.indexed_pairs(
             dframe, sameby, diffby, multilabel_col, found
         )
@@ -619,7 +627,9 @@ def _multilabel_matcher(dframe, multilabel_col: str, fastap=None):
     return find
 
 
-def _find_pairs_multilabel_sql(dframe, sameby, diffby, multilabel_col):
+def _find_pairs_multilabel_sql(
+    dframe, sameby, diffby, multilabel_col, *, candidate_first=False
+):
     """:func:`find_pairs_multilabel` in DuckDB SQL."""
     df = dframe.reset_index()
     df[multilabel_col] = _as_label_lists(df[multilabel_col])
@@ -634,14 +644,23 @@ def _find_pairs_multilabel_sql(dframe, sameby, diffby, multilabel_col):
         shared_item = "NOT"
 
     with duckdb.connect(":memory:"):
+        source = "df A JOIN df B ON A.index < B.index"
+        if candidate_first and (sameby or diffby):
+            # The index may have exceeded its size bound. Evaluate label
+            # overlap only on pairs selected by the other metadata rules.
+            monolabel_result = find_pairs(df, sameby, diffby).T
+            source = (
+                "monolabel_result C JOIN df A ON A.index = C.column0"
+                " JOIN df B ON B.index = C.column1"
+            )
         result = duckdb.sql(
             "SELECT * "
-            " FROM (SELECT *,"
+            " FROM (SELECT A.*, B.*,"
             f"list_intersect(A.{multilabel_col},B.{multilabel_col}) AS shared_items"
-            " FROM df A JOIN df B ON A.index < B.index)"
+            f" FROM {source})"
             f" WHERE {shared_item} len(shared_items) > 0"
         )
-        if len(sameby) or len(diffby):
+        if not candidate_first and (sameby or diffby):
             monolabel_result = find_pairs(df, sameby, diffby).T
             result = duckdb.sql(
                 f"SELECT *"
@@ -665,7 +684,10 @@ def _find_pairs_multilabel_sql(dframe, sameby, diffby, multilabel_col):
             results = duckdb.sql(string)
 
             # Sort them to match the original implementation
-            results = duckdb.sql("SELECT * FROM results ORDER BY matched_item")
+            order = (
+                "matched_item, index, index_1" if candidate_first else "matched_item"
+            )
+            results = duckdb.sql(f"SELECT * FROM results ORDER BY {order}")
 
             # Sorted pairs of indices (we select to reduce memory footprint)
             pairs = duckdb.sql("SELECT index,index_1 FROM results")
@@ -686,7 +708,12 @@ def _find_pairs_multilabel_sql(dframe, sameby, diffby, multilabel_col):
                 *[keys_counts_np[k] for k in ("matched_item", counts_col)],
             )
         else:  # if multilabel_col is in diffby return only the index
-            index_d = result.fetchnumpy()
+            ordered = (
+                duckdb.sql("SELECT * FROM result ORDER BY index, index_1")
+                if candidate_first
+                else result
+            )
+            index_d = ordered.fetchnumpy()
             result = np.array(
                 [index_d[k] for k in ("index", "index_1")], dtype=np.uint32
             ).T
