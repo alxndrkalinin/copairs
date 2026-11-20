@@ -21,8 +21,8 @@ arithmetic, keep from changing the samples:
   :data:`F32_MAX_GAP` (checked exhaustively by tests/test_cuda.py), and longer
   gaps replay in float64.
 
-So the gaps are Algorithm A's and the samples NumPy's. A CPU emulation of the
-kernel (glibc's libm) confirms it bit for bit; a GPU run has not yet.
+The sampler is designed to reproduce NumPy's Algorithm A gaps. The CUDA
+tests compare sampled APs and p-values with the CPU results.
 
 The counts compare float64 nulls against the same thresholds, and sum a
 group's members in the same order, as the NumPy backend; they are exact.

@@ -10,6 +10,7 @@ import types
 import warnings
 import importlib.util
 import multiprocessing
+from weakref import ref
 
 import numpy as np
 import pandas as pd
@@ -104,6 +105,23 @@ def test_cuda_without_cupy_names_the_extra():
         "assert 'cupy' not in sys.modules\n"
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_cuda_requires_streamed_sampler(monkeypatch):
+    """Public legacy sampler calls reject CUDA before probing the device."""
+
+    def unexpected_probe():
+        pytest.fail("The legacy sampler should reject CUDA before probing it")
+
+    monkeypatch.setattr(backend, "_import_cuda_backend", unexpected_probe)
+    with pytest.raises(ValueError, match="backend='cuda' requires sampler='streamed'"):
+        compute.get_null_dists(CONFS, 10, 0, backend="cuda")
+    with pytest.raises(ValueError, match="backend='cuda' requires sampler='streamed'"):
+        compute.p_values([0.5], [[2, 5]], 10, 0, backend="cuda")
+    with pytest.raises(ValueError, match="backend='cuda' requires sampler='streamed'"):
+        mean_average_precision(
+            pd.DataFrame(), ["g"], 10, 0.05, 0, null="copied", backend="cuda"
+        )
 
 
 @needs_cupy
@@ -483,11 +501,7 @@ def host_cuda(monkeypatch):
 
 
 def test_auto_never_runs_cuda(host_cuda):
-    """With a usable GPU, "auto" still runs on the CPU; only "cuda" runs the GPU.
-
-    The CUDA samples match NumPy's by error bounds, not identical arithmetic,
-    and no GPU has tested them bit for bit, so "auto" must not pick them.
-    """
+    """Automatic selection runs the CPU kernels even with a usable GPU."""
     assert nulls.resolve_backend("auto") == ("numba" if HAS_NUMBA else "numpy")
     rng = np.random.default_rng(0)
     confs = np.concatenate([CONFS, WIDE[:4]])
@@ -703,6 +717,38 @@ def _count_kernels():
         "member_sum": _numpy_member_sum,
         "mean_ge": _numpy_mean_ge,
     }
+
+
+@needs_cupy
+def test_cuda_releases_count_batch_before_allocating_next(monkeypatch):
+    """Previous histogram and count buffers do not overlap the next batch."""
+    from copairs.nulls import cuda
+
+    device, _ = fake_gpu(monkeypatch)
+    kernels = _count_kernels()
+    previous = []
+    allocations = []
+    zeros = device.zeros
+
+    def record_alloc(*args, **kwargs):
+        allocations.append(tuple(buf() is not None for buf in previous))
+        return zeros(*args, **kwargs)
+
+    def kernel(source, name):
+        def launch(grid, block, args):
+            kernels[name](*args)
+            if name == "suffix_add":
+                previous[:] = [ref(buf) for buf in (args[0], args[-2], args[-1])]
+
+        return launch
+
+    monkeypatch.setattr(device, "zeros", record_alloc)
+    monkeypatch.setattr(cuda._cuda, "kernel", kernel)
+    null = device.asarray([[0.25, 0.75]])
+    counts = np.zeros(2, dtype=np.int64)
+    cuda.count_ge(null, np.array([0.25, 0.5]), np.array([0, 2]), counts, 56)
+    assert allocations == [(), (), (False, False, False), (False, False, False)]
+    np.testing.assert_array_equal(counts, [2, 1])
 
 
 @pytest.fixture(params=["fake", pytest.param("gpu", marks=needs_gpu)])
