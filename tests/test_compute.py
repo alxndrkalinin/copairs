@@ -1,10 +1,16 @@
 """Test pairwise distance calculation functions."""
 
+import tempfile
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import pytest
 from scipy.spatial.distance import cdist
 
 from copairs import compute
+from copairs.nulls import backend
+from copairs.map.average_precision import p_values
 
 SEED = 0
 rng = np.random.default_rng(SEED)
@@ -200,28 +206,180 @@ def test_hamming():
     assert np.allclose(hamming_gt, hamming)
 
 
-def test_get_null_dists_empty():
+def test_null_dist_cached():
+    """Test that null_dist_cached creates and uses cache."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir)
+
+        null_dist = compute.null_dist_cached(
+            num_pos=5, total=20, seed=42, null_size=100, cache_dir=cache_dir
+        )
+
+        assert len(null_dist) == 100
+        assert np.all(null_dist >= 0)
+        assert np.all(null_dist <= 1)
+
+        # Cache stores one .npy file per (total, num_pos, seed) triple
+        npy_files = list(cache_dir.glob("*.npy"))
+        assert len(npy_files) == 1
+        assert npy_files[0].name == "n20_k5_s42.npy"
+
+
+def test_null_dist_cached_hit():
+    """Test that null_dist_cached returns consistent results on cache hit."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir)
+        kwargs = dict(num_pos=5, total=20, seed=42, null_size=100, cache_dir=cache_dir)
+
+        first = compute.null_dist_cached(**kwargs)
+        second = compute.null_dist_cached(**kwargs)
+        assert np.array_equal(first, second)
+
+
+def test_null_dist_cached_corrupt():
+    """Test that a corrupted cache file is regenerated, not propagated."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir)
+        path = cache_dir / "n20_k5_s42.npy"
+
+        # Write garbage to simulate corruption
+        path.write_bytes(b"not a valid npy file")
+
+        null_dist = compute.null_dist_cached(
+            num_pos=5, total=20, seed=42, null_size=100, cache_dir=cache_dir
+        )
+        assert len(null_dist) == 100
+        assert np.all(null_dist >= 0)
+        assert np.all(null_dist <= 1)
+
+
+def _parallel_worker(args):
+    """Worker for parallel cache stress test."""
+    cache_dir, num_pos, total, seed, null_size = args
+    return compute.null_dist_cached(num_pos, total, seed, null_size, Path(cache_dir))
+
+
+def test_null_dist_cached_parallel():
+    """Test that parallel workers don't corrupt the cache.
+
+    Spawns 16 workers all racing on the same cache key.
+    """
+    from multiprocessing import Pool
+
+    num_pos, total, seed, null_size = 5, 100, 42, 10_000
+    n_workers = 16
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        args = [(tmpdir, num_pos, total, seed, null_size)] * n_workers
+
+        with Pool(n_workers) as pool:
+            results = pool.map(_parallel_worker, args)
+
+        # All workers should return identical results
+        for r in results:
+            assert np.array_equal(results[0], r)
+
+
+def test_get_null_dists_empty(tmp_path):
     """No configurations give an empty array of null distributions."""
     confs = np.empty((0, 2), dtype=int)
-    null_dists = compute.get_null_dists(confs, 100, seed=0, progress_bar=False)
+    null_dists = compute.get_null_dists(
+        confs, 100, seed=0, cache_dir=tmp_path, progress_bar=False
+    )
     assert null_dists.shape == (0, 100)
 
 
-def test_p_values_empty():
+def test_p_values_empty(tmp_path, monkeypatch):
     """No AP scores give no p-values."""
+    # p_values has no cache_dir argument; keep the default cache out of ~/.copairs
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pvals = compute.p_values(
         np.array([]), np.empty((0, 2), dtype=int), 100, 0, progress_bar=False
     )
     assert len(pvals) == 0
 
 
-def test_get_null_dists_unseeded():
-    """Unseeded nulls are fresh draws."""
+def test_get_null_dists_unseeded_skips_cache(tmp_path):
+    """Unseeded nulls are fresh draws and are never written to the cache."""
     confs = np.array([[3, 20], [5, 30]])
-    kwargs = dict(null_size=200, seed=None, progress_bar=False)
+    kwargs = dict(null_size=200, seed=None, cache_dir=tmp_path, progress_bar=False)
     first = compute.get_null_dists(confs, **kwargs)
     second = compute.get_null_dists(confs, **kwargs)
+    assert list(tmp_path.rglob("*.npy")) == []
     assert not np.array_equal(first, second)
+
+
+def test_get_null_dists_preserves_released_seed_and_cache(tmp_path, monkeypatch):
+    """The default sampler uses the v0.6.0 draws and cache file."""
+    confs = np.array([[1, 4]])
+    expected = np.array(
+        [[1 / 3, 1 / 4, 1 / 4, 1 / 2, 1 / 3, 1 / 2, 1 / 3, 1]], dtype=np.float32
+    )
+    key = tmp_path / "seed7/ns8/n4_k1_s3443324636.npy"
+    got = compute.get_null_dists(confs, 8, 7, tmp_path, False)
+    np.testing.assert_array_equal(got, expected)
+    np.testing.assert_array_equal(np.load(key), expected[0])
+
+    def reject_resampling(*args):
+        pytest.fail("the released cache key should be reused")
+
+    monkeypatch.setattr(compute, "random_ap", reject_resampling)
+    np.testing.assert_array_equal(
+        compute.get_null_dists(confs, 8, 7, tmp_path, False), expected
+    )
+
+
+def test_get_null_dists_legacy_accepts_wide_seed(tmp_path):
+    """The released SeedSequence path accepts nonnegative seeds beyond uint64."""
+    expected = np.array(
+        [[1 / 3, 1 / 2, 1, 1 / 4, 1, 1 / 4, 1 / 2, 1 / 3]], dtype=np.float32
+    )
+    got = compute.get_null_dists([[1, 4]], 8, 2**64 + 7, tmp_path, False)
+    np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.parametrize("confs", [[], [[1, 4]], [[0, 4], [0, 0]]])
+def test_get_null_dists_streamed_validates_explicit_backend(confs, monkeypatch):
+    """An unavailable Numba backend raises even without ranked configurations."""
+
+    def unavailable():
+        raise ImportError("Install copairs[numba]")
+
+    monkeypatch.setattr(backend, "_import_numba_backend", unavailable)
+    with pytest.raises(ImportError, match=r"copairs\[numba\]"):
+        compute.get_null_dists(confs, 8, 7, sampler="streamed", backend="numba")
+
+
+def test_get_null_dists_streamed_without_positives():
+    """Zero-positive configurations give NaNs when the backend is available."""
+    got = compute.get_null_dists(
+        [[0, 4], [0, 0]], 8, 7, sampler="streamed", backend="numpy"
+    )
+    np.testing.assert_array_equal(got, np.full((2, 8), np.nan, dtype=np.float32))
+
+
+def test_ap_p_values_defaults_to_released_sampler(tmp_path, monkeypatch):
+    """Default AP p-values bypass the Numba probe and match v0.6.0."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    def reject_numba_probe():
+        pytest.fail("the default legacy sampler should not probe Numba")
+
+    monkeypatch.setattr(backend, "_available", reject_numba_probe)
+    frame = pd.DataFrame(
+        {
+            "average_precision": [0.5, np.nan],
+            "n_pos_pairs": [1, 0],
+            "n_total_pairs": [4, 4],
+        }
+    )
+    np.testing.assert_array_equal(
+        p_values(frame, 8, 7, False), np.array([4 / 9, np.nan], dtype=np.float32)
+    )
+    np.testing.assert_array_equal(
+        p_values(frame, 8, 7, False, sampler="streamed", backend="numpy"),
+        np.array([6 / 9, np.nan], dtype=np.float32),
+    )
 
 
 @pytest.mark.parametrize("metric", ["cityblock", "canberra", "jaccard", "seuclidean"])

@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from copairs import nulls
+from copairs import nulls, compute
 from copairs.nulls import joint, common, permutation
-from copairs.nulls.sampler import ap_nulls
+from copairs.nulls import backend as backend_module
 
 COMPLETE4 = [(i, j) for i in range(4) for j in range(i + 1, 4)]
 SIGNATURES = [
@@ -181,7 +181,7 @@ def test_chunks_bound_the_per_sample_arrays(monkeypatch):
         joint.canonical_signature(*SIGNATURES[3]),
     ]
     plan = joint.joint_plan(sigs, 5)
-    expected = joint.joint_nulls(plan, 500, start=11)
+    expected = joint.joint_nulls(plan, 500, start=11, backend="numpy")
     sizes = []
     full = joint._joint_null_np
 
@@ -193,13 +193,21 @@ def test_chunks_bound_the_per_sample_arrays(monkeypatch):
 
     monkeypatch.setattr(joint, "_joint_null_np", spy)
     monkeypatch.setattr(joint, "_CHUNK_ELEMENTS", 2**9, raising=False)
-    got = joint.joint_nulls(plan, 500, start=11, backend="numpy")
+
+    def unexpected_backend_probe():
+        pytest.fail("the default joint null should use NumPy directly")
+
+    monkeypatch.setattr(backend_module, "_available", unexpected_backend_probe)
+    got = joint.joint_nulls(plan, 500, 11, slice(None))
     np.testing.assert_array_equal(got, expected)
     assert max(sizes) <= 2**9
-    p = joint.joint_pvalues(
-        np.full(3, 0.3), np.arange(3), sigs, 500, 5, backend="numpy"
-    )
+    p = joint.joint_pvalues(np.full(3, 0.3), np.arange(3), sigs, 500, 5, False)
     assert max(sizes) <= 2**9 and 0 < p.min() and p.max() <= 1
+    singleton = joint.group_pvalues(
+        [0.3], [np.array([0])], np.array([3]), np.array([100]), 500, 5,
+        None, None, False,
+    )  # fmt: skip
+    np.testing.assert_array_equal(singleton, p[2:])
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -257,8 +265,8 @@ def test_binomial_matches_scipy(n, p):
 @pytest.mark.parametrize("conf", [(3, 100), (1, 30), (20, 50)])
 def test_singleton_is_the_ap_null(conf):
     """A group of one member follows the AP null of its configuration."""
-    got = null_of([conf], [], 200_000)
-    ref = ap_nulls([[conf[0], conf[0] + conf[1]]], 200_000, seed=1, dtype=np.float64)[0]
+    got = null_of([conf], [], 200_000).astype(np.float32)  # random_ap's precision
+    ref = compute.random_ap(200_000, conf[0], conf[0] + conf[1], seed=1)
     assert stats.ks_2samp(got, ref).pvalue > 1e-3
 
 

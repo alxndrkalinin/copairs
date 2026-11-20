@@ -1,4 +1,4 @@
-"""Numba's on-disk cache keyed on every source file a kernel compiles.
+"""Shared Numba kernel cache and launch helpers.
 
 ``numba.njit(cache=True)`` checks a cached kernel only against the file that
 defines it. Jitted functions it calls from other files are compiled into the
@@ -11,10 +11,35 @@ Numba is imported only when a kernel is built, so importing this module does
 not need the optional dependency.
 """
 
+import os
 import types
 import hashlib
+import threading
 from pathlib import Path
 from functools import cache
+
+_LAUNCH = threading.Lock()
+
+
+def _reset_launch_lock() -> None:
+    """Give a forked child its own lock even if the parent's was held."""
+    global _LAUNCH
+    _LAUNCH = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_launch_lock)
+
+
+def launch(kernel, *args):
+    """Run one parallel Numba kernel at a time within copairs.
+
+    Use this for parallel dispatchers because Numba's workqueue threading
+    layer aborts on concurrent launches from Python threads. Serial kernels
+    can run directly on their calling threads.
+    """
+    with _LAUNCH:
+        return kernel(*args)
 
 
 @cache

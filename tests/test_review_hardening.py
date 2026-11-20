@@ -13,11 +13,11 @@ from tests.test_review_adjustments import profiles
 
 @pytest.mark.parametrize("null", ["joint", "permutation", "copied"])
 @pytest.mark.parametrize("dtype", ["Int64", "UInt32", "int64", "uint32", "float64"])
-def test_numeric_count_dtypes(dtype, null):
+def test_numeric_count_dtypes(dtype, null, tmp_path):
     """All models normalize valid integer-valued count columns consistently."""
     ap, _ = profiles()
     converted = ap.astype({"n_pos_pairs": dtype, "n_total_pairs": dtype})
-    kwargs = dict(null=null, progress_bar=False)
+    kwargs = dict(null=null, progress_bar=False, cache_dir=tmp_path)
     pd.testing.assert_frame_equal(
         get_map_pvalue(converted, ["g"], 20, **kwargs),
         get_map_pvalue(ap, ["g"], 20, **kwargs),
@@ -25,14 +25,14 @@ def test_numeric_count_dtypes(dtype, null):
 
 
 @pytest.mark.parametrize("null", ["joint", "permutation", "copied"])
-def test_arrow_count_dtypes(null):
+def test_arrow_count_dtypes(null, tmp_path):
     """Arrow-backed integral columns follow the same validation and sampling path."""
     pytest.importorskip("pyarrow")
     ap, _ = profiles()
     converted = ap.astype(
         {"n_pos_pairs": "int64[pyarrow]", "n_total_pairs": "uint32[pyarrow]"}
     )
-    kwargs = dict(null=null, progress_bar=False)
+    kwargs = dict(null=null, progress_bar=False, cache_dir=tmp_path)
     pd.testing.assert_frame_equal(
         get_map_pvalue(converted, ["g"], 20, **kwargs),
         get_map_pvalue(ap, ["g"], 20, **kwargs),
@@ -106,11 +106,15 @@ def test_invalid_counts_raise_useful_errors(value, dtype):
 
 @pytest.mark.parametrize("null", ["joint", "permutation", "copied"])
 @pytest.mark.filterwarnings("error::RuntimeWarning")
-def test_excluded_group_counts_are_not_cast(null):
+def test_excluded_group_counts_are_not_cast(null, tmp_path):
     """Excluded missing-key rows can contain missing counts without contaminating other groups."""
     ap, _ = profiles()
-    expected = get_map_pvalue(ap[ap.g == "b"], ["g"], 20, null=null, progress_bar=False)
+    expected = get_map_pvalue(
+        ap[ap.g == "b"], ["g"], 20, null=null, progress_bar=False, cache_dir=tmp_path
+    )
     ap["n_total_pairs"] = ap.n_total_pairs.astype(float)
     ap.loc[ap.g == "a", ["g", "n_total_pairs"]] = [None, np.nan]
-    got = get_map_pvalue(ap, ["g"], 20, null=null, progress_bar=False)
+    got = get_map_pvalue(
+        ap, ["g"], 20, null=null, progress_bar=False, cache_dir=tmp_path
+    )
     assert got.p_value.tolist() == expected.p_value.tolist()

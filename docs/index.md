@@ -1,12 +1,25 @@
 # copairs
 
-`copairs` is a Python package for finding groups of profiles based on metadata and calculate mean Average Precision to assess intra- vs inter-group similarities.
+copairs finds pairs of profiles using metadata and measures how well profiles
+retrieve related profiles using average precision (AP) and mean average
+precision (mAP).
 
 ## Installation
+
+copairs requires Python 3.11 or newer.
 
 ```bash
 pip install copairs
 ```
+
+## Guides
+
+- [mAP null distributions](map-nulls.md) for choosing a null model and working
+  with pair metadata, multilabel profiles, and resource limits.
+- [AP null sampling](ap-null-sampling.md) for seeded results, caching, and
+  optional acceleration.
+- [Examples](examples/README.md) for finding pairs and running AP and mAP
+  analyses.
 
 ## Citation
 If you find this work useful for your research, please cite our [paper](https://doi.org/10.1038/s41467-025-60306-2):

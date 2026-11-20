@@ -987,8 +987,8 @@ class _Run:
 
 
 def permutation_null(
-    members, edges, blocks, block_of, similarity, null_size, seed, *, pool=None,
-    out=None, backend="auto", parallel=True,
+    members, edges, blocks, block_of, similarity, null_size, seed, pool=None,
+    out=None, *, backend="numpy", parallel=True,
 ):  # fmt: skip
     """Run ``null_size`` label permutations of one group.
 
@@ -996,8 +996,8 @@ def permutation_null(
     the observed labels' (``identity``, within
     :func:`~copairs.nulls.common.tie_thresholds`' tolerance), that mAP,
     and the reference pool, reusable by groups ranking the same references.
-    ``out`` receives the draws' mAPs if given. ``backend`` is ``"auto"``
-    (default), ``"numba"`` or ``"numpy"``, with identical draws and mAPs
+    ``out`` receives the draws' mAPs if given. ``backend`` is ``"numpy"``
+    (default), ``"numba"`` or ``"auto"``, with identical draws and mAPs
     (:func:`~copairs.nulls.resolve_backend`). Under Numba, ``parallel``
     runs the draws on Numba's threads, else on the calling thread.
     """
@@ -1109,9 +1109,9 @@ def _check_identity(g, identity, observed):
 
 def permutation_pvalues(
     groups, profile, num_pos, num_total, pos_pairs, neg_pairs, similarity,
-    null_size, seed, *, observed=None, progress_bar=False, max_workers=None,
+    null_size, seed, observed=None, progress_bar=False, max_workers=None,
     max_reference_profiles=MAX_POOL, pool_memory_budget=POOL_BUDGET,
-    key_table_memory_budget=KEY_TABLE_BUDGET, backend="auto",
+    key_table_memory_budget=KEY_TABLE_BUDGET, *, backend="numpy",
 ):  # fmt: skip
     """P-value of each group's mAP against its label permutations.
 
@@ -1158,8 +1158,8 @@ def permutation_pvalues(
         Byte limit for the optional shared key table (default 256 MiB).
         Zero disables sharing.
     backend : str
-        ``"auto"`` (default), ``"numba"`` or ``"numpy"``; see
-        :func:`permutation_null`. P-values do not depend on it.
+        ``"numpy"`` (default), ``"numba"`` or ``"auto"``. See
+        :func:`permutation_null` for the available engines.
 
     Returns
     -------
@@ -1826,10 +1826,10 @@ def _label_run(
 
 
 def label_permutation_pvalues(
-    groups, rows, num_pos, num_total, pairs, null_size, seed, *, observed=None,
+    groups, rows, num_pos, num_total, pairs, null_size, seed, observed=None,
     progress_bar=False, max_workers=None, max_reference_profiles=MAX_POOL,
     pool_memory_budget=POOL_BUDGET, key_table_memory_budget=KEY_TABLE_BUDGET,
-    backend="auto",
+    *, backend="numpy",
 ):  # fmt: skip
     """P-value of each multilabel group's mAP against moves of its label.
 

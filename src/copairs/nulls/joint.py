@@ -477,13 +477,13 @@ def joint_plan(signatures, seed: int) -> tuple[np.ndarray, ...]:
 
 
 def joint_nulls(
-    plan, null_size: int, start: int = 0, rows=None, backend: str = "auto"
+    plan, null_size: int, start: int = 0, rows=None, *, backend: str = "numpy"
 ) -> np.ndarray:
     """float64 mAP samples ``start, ..., start + null_size - 1`` of each signature.
 
     ``rows`` is a ``slice`` of the plan's signatures (default all); the result
     has one row per signature it selects, in its order. ``backend`` is
-    ``"auto"`` (default), ``"numba"`` or ``"numpy"``, with identical samples
+    ``"numpy"`` (default), ``"numba"`` or ``"auto"``, with identical samples
     (:func:`~copairs.nulls.resolve_backend`).
     """
     sigs = np.arange(len(plan[0]) - 1)[rows or slice(None)]
@@ -521,7 +521,8 @@ def joint_pvalues(
     null_size: int,
     seed: int | None,
     progress_bar: bool = False,
-    backend: str = "auto",
+    *,
+    backend: str = "numpy",
 ) -> np.ndarray:
     """P-value of each group's mAP against the joint null of its signature.
 
@@ -530,7 +531,7 @@ def joint_pvalues(
     ``(num_pos, num_neg)`` and its positive pairs between local member
     indices. ``p_g = (1 + #{null >= thr_g}) / (null_size + 1)`` with ``thr_g``
     from :func:`~copairs.nulls.tie_thresholds`. Nulls are generated in chunks
-    of samples and not stored, on ``backend`` (see :func:`joint_nulls`); the
+    of samples and not stored, on ``backend`` (see :func:`joint_nulls`). The
     Numba backend samples a chunk of many signatures per launch.
     """
     thr = tie_thresholds(scores)
@@ -597,7 +598,8 @@ def group_pvalues(
     profile: np.ndarray | None = None,
     pos_pairs: np.ndarray | None = None,
     progress_bar: bool = False,
-    backend: str = "auto",
+    *,
+    backend: str = "numpy",
 ) -> np.ndarray:
     """P-values under the requested joint null; insufficient pair information raises.
 

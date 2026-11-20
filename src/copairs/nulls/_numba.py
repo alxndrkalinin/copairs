@@ -13,13 +13,13 @@ permutation null's pool of groups). Parallel kernels launch one at a time
 the calling thread without the GIL, so threads can run groups at once.
 """
 
-import threading
 from pathlib import Path
 
 import numba
 import numpy as np
 
 from copairs.nulls import joint, permutation
+from copairs._numba_cache import launch as _launch
 from copairs._numba_cache import cached_njit
 from copairs.nulls.philox import uniform53, philox4x32
 from copairs.nulls.pvalues import _GROUP_WORK_ROWS
@@ -53,20 +53,6 @@ _draw_pool_nb, _label_group_map_nb = permutation._make_label_kernels(
 # Samples or draws per parallel task; each task allocates its scratch once.
 _JOINT_TASK = 256
 _PERMUTATION_TASK = 128
-# Held while a parallel kernel runs (see _launch).
-_LAUNCH = threading.Lock()
-
-
-def _launch(kernel, *args):
-    """Run the parallel ``kernel`` on Numba's threads, one launch at a time.
-
-    Callers may launch from several threads. Numba's workqueue threading
-    layer, its fallback without TBB or OpenMP, aborts the process on
-    concurrent launches, and the OpenMP layer would start a team of threads
-    per launching thread.
-    """
-    with _LAUNCH:
-        kernel(*args)
 
 
 def threads() -> int:
