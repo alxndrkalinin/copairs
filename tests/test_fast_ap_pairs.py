@@ -123,6 +123,34 @@ def test_distances_without_kernel_recompute_with_numpy():
     )
 
 
+@pytest.mark.parametrize("distance", ["euclidean", "manhattan", "chebyshev"])
+@pytest.mark.parametrize(
+    "dtype, offset",
+    [(np.int64, 2**53), (np.int64, -(2**53) - 2), (np.uint64, 2**63)],
+    ids=["signed-positive", "signed-negative", "unsigned"],
+)
+def test_large_integer_minkowski_ap_preserves_numpy_order(distance, dtype, offset):
+    """Adjacent large integers stay distinct when scoring and recomputing AP pairs."""
+    meta = pd.DataFrame({"group": ["a", "b", "a", "b"]})
+    # Descending values keep the unsigned subtractions in the NumPy path exact.
+    feats = np.array([[offset + delta] for delta in (2, 1, 1, 0)], dtype=dtype)
+    args = (meta, feats, ["group"], [], [], ["group"])
+    kwargs = dict(distance=distance, return_pairs=True, progress_bar=False)
+    expected, _ = average_precision(*args, backend="numpy", **kwargs)
+    got, pairs = average_precision(*args, backend="numba", **kwargs)
+    np.testing.assert_array_equal(
+        got["average_precision"], expected["average_precision"]
+    )
+    assert pairs["similarity"].kernel_backend is None
+    np.testing.assert_array_equal(pairs["similarity"](np.array([[1, 3]])), [0.5])
+    null_kwargs = {**NULL, "null_size": 16}
+    got_map = mean_average_precision(got, ["group"], **null_kwargs)
+    expected_map = mean_average_precision(expected, ["group"], **null_kwargs)
+    pd.testing.assert_frame_equal(got_map, expected_map)
+    with pytest.raises(ValueError, match="integers outside the exact float64 range"):
+        fastap.PairSimilarity(feats, distance)
+
+
 @pytest.mark.parametrize("multi", [False, True], ids=["single", "multilabel"])
 def test_permutation_null_reproduces_numba_aps_of_near_ties(multi):
     """The null re-ranks a Numba AP stage's near-tied pairs as the stage did.

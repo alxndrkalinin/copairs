@@ -116,6 +116,8 @@ def pair_similarity(
         ``(n, d)`` profiles; the kernel uses them as given here.
     metric : str or callable
         A distance name; only :data:`FAST_METRICS` have a kernel.
+        Euclidean, Manhattan, and Chebyshev distances also need integer
+        features to fit in float64's exact-integer range.
     parallel : bool
         Run on Numba's threads (default), or serially on the calling
         thread, releasing the GIL, for many small calls from several
@@ -133,6 +135,16 @@ def pair_similarity(
     if not isinstance(metric, str) or metric not in FAST_METRICS:
         return None
     feats = np.asarray(feats)
+    if (
+        metric in MINKOWSKI_METRICS
+        and feats.dtype.kind in "iu"
+        and feats.dtype.itemsize >= 8
+        and feats.size
+    ):
+        # Casting first can merge adjacent integers and erase their distance.
+        exact_limit = 2**53
+        if int(feats.max()) > exact_limit or int(feats.min()) < -exact_limit:
+            return None
     if feats.dtype not in (np.float32, np.float64):
         feats = feats.astype(np.float64)
 
@@ -168,8 +180,13 @@ def pair_similarity(
 
 
 def PairSimilarity(feats: np.ndarray, metric: str) -> Callable:
-    """:func:`pair_similarity`'s kernel, raising ValueError for metrics without one."""
+    """Return :func:`pair_similarity`'s kernel or raise ValueError if absent."""
     kernel = pair_similarity(feats, metric)
     if kernel is None:
+        if isinstance(metric, str) and metric in MINKOWSKI_METRICS:
+            raise ValueError(
+                f"no fast kernel for {metric!r} with integers outside the exact "
+                "float64 range"
+            )
         raise ValueError(f"no fast kernel for {metric!r}; expected {FAST_METRICS}")
     return kernel

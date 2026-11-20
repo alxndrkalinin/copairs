@@ -222,8 +222,9 @@ ap = copairs.map.average_precision(meta, feats, ..., backend="numba")
 ```
 
 - Similarities come from per-pair kernels for `cosine`, `abs_cosine`,
-  `correlation`, `euclidean`, `manhattan` and `chebyshev`; other distances and
-  callables keep the NumPy functions.
+  `correlation`, `euclidean`, `manhattan` and `chebyshev`. Other distances and
+  callables use NumPy functions. So do `euclidean`, `manhattan` and `chebyshev`
+  on integer features outside float64's exact-integer range.
 - AP is computed by counting, for each negative, the sorted positives it ranks
   behind, without sorting rank lists; normalized AP uses one table of harmonic
   numbers.

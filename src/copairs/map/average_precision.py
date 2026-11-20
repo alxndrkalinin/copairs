@@ -330,15 +330,17 @@ def average_precision(
         The default ``"numpy"`` has no optional dependencies and gives the
         APs of earlier copairs releases. ``"numba"`` (install
         ``copairs[numba]``) computes similarities with parallel kernels for
-        cosine, abs_cosine, correlation, euclidean, manhattan and chebyshev
-        (other distances use the NumPy functions), AP by counting the negatives
-        between sorted positives instead of sorting rank lists, and normalized
-        AP from a harmonic-number table. Given the same similarities, its APs
-        match ``"numpy"`` to float64 rounding. The kernels' similarities match
+        cosine, abs_cosine, correlation, euclidean, manhattan and chebyshev.
+        Other distances use NumPy functions, as do euclidean, manhattan and
+        chebyshev on integer features outside float64's exact-integer range.
+        The backend computes AP by counting the negatives between sorted
+        positives and normalized AP from a harmonic-number table.
+        Given the same similarities, its APs match ``"numpy"`` to float64
+        rounding. The kernels' similarities match
         to float32 rounding, so near-ties can rank differently, and they are
         computed in float64, so float32 rows whose norms overflow float32 get
         their actual similarity. The kernels take all pairs at once:
-        ``batch_size`` and ``progress_bar`` apply only to the other distances.
+        ``batch_size`` and ``progress_bar`` apply only to NumPy similarities.
         The pairs attached to the frame recompute similarities with the same
         kernels, so the permutation null ranks pairs as the APs did; each
         permutation null builds the kernel's own copy of ``feats`` and drops
