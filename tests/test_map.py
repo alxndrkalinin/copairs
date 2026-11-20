@@ -677,3 +677,50 @@ def test_empty_input_checks_arguments_first(bad, match, hierarchical):
     empty.attrs.clear()  # no attached pairs
     with pytest.raises(ValueError, match=match):
         run_map_entry(empty, hierarchical, **bad)
+
+
+@pytest.mark.parametrize("seed, hits", [(7, 3), (2**100 + 17, 1)])
+def test_default_copied_pvalues_reproduce_v060(tmp_path, monkeypatch, seed, hits):
+    """The default copied sampler reproduces v0.6.0 draws and uses its cache."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    frame = ap_frame([("g", 0.5, 1, 4)] * 2)
+
+    result = get_map_pvalue(frame, ["g"], 8, seed, False, 1, null="copied")
+
+    assert result["p_value"].tolist() == [(hits + 1) / 9]
+    cache = tmp_path / ".copairs" / f"seed{seed}" / "ns8"
+    cached = list(cache.glob("n4_k1_s*.npy"))
+    assert len(cached) == 1
+    assert np.load(cached[0]).shape == (8,)
+
+
+@pytest.mark.parametrize(
+    "fn, args, keys",
+    [
+        (get_map_pvalue, (8, 7, False, 1), ["g"]),
+        (mean_average_precision, (8, 0.05, 7, False, 1), ["g"]),
+        (
+            mean_average_precision_hierarchical,
+            (8, 0.05, 7, ["h"], False, 1),
+            ["g", "h"],
+        ),
+    ],
+)
+def test_map_entries_preserve_positional_cache_dir(tmp_path, fn, args, keys):
+    """The cache_dir, pos_pairs, null and pairs slots have their released order."""
+    frame = ap_frame([("g", 0.5, 1, 4)] * 2).assign(h=0)
+    positional = fn(frame, keys, *args, tmp_path / "pos", None, "copied", None)
+    keyword = fn(frame, keys, *args, cache_dir=tmp_path / "kw", null="copied")
+
+    pd.testing.assert_frame_equal(positional, keyword)
+    assert positional["p_value"].tolist() == [4 / 9]
+    for directory in (tmp_path / "pos", tmp_path / "kw"):
+        assert len(list(directory.rglob("n4_k1_s*.npy"))) == 1
+
+
+@pytest.mark.parametrize("null", ["permutation", "joint"])
+def test_other_nulls_reject_copied_streaming_options(null):
+    """Only the copied null accepts the streamed AP sampler."""
+    frame = ap_frame([("g", 0.5, 1, 4)])
+    with pytest.raises(ValueError, match="null='copied'"):
+        get_map_pvalue(frame, ["g"], 0, null=null, sampler="streamed")

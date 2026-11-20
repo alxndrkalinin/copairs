@@ -90,7 +90,7 @@ def test_component_null_against_independent_enumeration(label_example):
         group.members, group.edges, group.lone, group.block_of, pool
     )
     placements = np.array(list(itertools.permutations(range(4), 2)))
-    actual = permutation._label_maps_np(layout, pool.code[placements])
+    actual = permutation._label_maps_np(layout.tables(0), pool.code[placements])
     unit = feats / np.linalg.norm(feats, axis=1, keepdims=True)
     similarities = unit @ unit.T
     expected = []

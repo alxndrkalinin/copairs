@@ -3,13 +3,17 @@
 import os
 import tempfile
 import itertools
-from typing import Tuple, Union, Callable, Optional
+from typing import Tuple, Union, Callable
 from pathlib import Path
 from multiprocessing.pool import ThreadPool
 
 import numpy as np
 from scipy.spatial.distance import _METRICS_NAMES as SCIPY_METRICS_NAMES
 from scipy.spatial.distance import cdist
+
+from copairs import nulls
+from copairs.nulls.common import resolve_seed, check_null_size
+from copairs.nulls.backend import check_sampler, resolve_backend
 
 
 def parallel_map(
@@ -484,7 +488,7 @@ def random_ap(num_perm: int, num_pos: int, total: int, seed: int):
     return null_dist
 
 
-def _cache_read(path: Path) -> Optional[np.ndarray]:
+def _cache_read(path: Path) -> np.ndarray | None:
     """Read a cached .npy file, returning None on any corruption or absence."""
     try:
         return np.load(path)
@@ -559,32 +563,51 @@ def _conf_seed(seed: int, num_pos: int, total: int) -> int:
 def get_null_dists(
     confs: np.ndarray,
     null_size: int,
-    seed: int,
-    cache_dir: Optional[Union[str, Path]] = None,
+    seed: int | None,
+    cache_dir: str | Path | None = None,
     progress_bar: bool = True,
+    *,
+    sampler: str = "legacy",
+    backend: str = "auto",
 ) -> np.ndarray:
     """Generate null distributions for each configuration of positive and total pairs.
+
+    The default sampler uses the v0.6.0 draw stream and disk cache. The
+    streamed sampler uses the Philox draws from :func:`copairs.nulls.ap_nulls`.
+    Both seed each configuration independently of other configurations.
 
     Parameters
     ----------
     confs : np.ndarray
-        Array where each row contains the number of positive pairs (`num_pos`)
-        and total pairs (`total`) for a specific configuration.
+        ``(n, 2)`` array where each row contains the number of positive pairs
+        (`num_pos`) and total pairs (`total`) for a specific configuration.
     null_size : int
         Number of samples to generate in the null distribution.
-    seed : int
-        Random seed for reproducibility. Each configuration's null is seeded by
-        ``(seed, num_pos, total)``, so it does not depend on the other
-        configurations. With ``None``, nulls are fresh draws and are not cached.
+    seed : int or None
+        Nonnegative seed for reproducibility. The streamed sampler requires
+        it to be below ``2**64``. ``None`` uses fresh draws and skips the cache.
+    cache_dir : str or pathlib.Path, optional
+        Root of the legacy sampler's cache. Defaults to ``~/.copairs``.
     progress_bar : bool
-        Whether or not to show tqdm's progress bar.
+        Show a progress bar for the legacy sampler.
+    sampler : str
+        ``"legacy"`` (default) or ``"streamed"``. Streamed draws require no
+        disk cache.
+    backend : str
+        ``"auto"`` (default), ``"numba"`` or ``"numpy"``. For streamed draws,
+        ``"auto"`` selects Numba when usable and otherwise NumPy. Both
+        produce the same draws. The legacy sampler always uses NumPy.
 
     Returns
     -------
     np.ndarray
-        A 2D array where each row corresponds to a null distribution for a specific
-        configuration.
+        A 2D float32 array where each row corresponds to a null distribution for
+        a specific configuration. Configurations without positives get NaN.
     """
+    check_sampler(sampler, backend, cache_dir)
+    if sampler == "streamed":
+        return _streamed_null_dists(confs, null_size, seed, backend)
+
     cache_dir = Path.home() / ".copairs" if cache_dir is None else Path(cache_dir)
     cache_dir = cache_dir / f"seed{seed}" / f"ns{null_size}"
     if seed is not None:
@@ -607,18 +630,58 @@ def get_null_dists(
             )
 
     parallel_map(par_func, np.arange(num_confs), progress_bar)
-
     return null_dists
+
+
+def _streamed_null_dists(confs, null_size, seed, backend):
+    """Materialize the requested Philox draws without using the disk cache."""
+    # Take (n, 2) rows, or no configurations at all.
+    confs = np.asarray(confs)
+    if confs.size == 0:
+        confs = confs.reshape(0, 2)
+    elif confs.ndim != 2 or confs.shape[1] != 2:
+        raise ValueError(f"confs must have shape (n, 2), got {confs.shape}")
+    null_size = check_null_size(null_size)
+    seed = resolve_seed(seed)
+    ranked = ~_without_positives(confs)
+    if ranked.all():
+        return nulls.ap_nulls(confs, null_size, seed, backend=backend)
+    has_ranked = ranked.any()
+    if not has_ranked:
+        # No sampling call will validate the requested backend.
+        resolve_backend(backend)
+    out = np.full((len(confs), null_size), np.nan, dtype=np.float32)
+    if has_ranked:
+        out[ranked] = nulls.ap_nulls(confs[ranked], null_size, seed, backend=backend)
+    return out
+
+
+def _without_positives(confs: np.ndarray) -> np.ndarray:
+    """Mask of the ``(n, 2)`` configurations with no positives (undefined AP).
+
+    They get NaN nulls and p-values of 1; sample ``j`` of any other
+    configuration does not depend on them.
+    """
+    return (confs[:, 0] == 0) & (confs[:, 1] >= 0)
 
 
 def p_values(
     ap_scores: np.ndarray,
     null_confs: np.ndarray,
     null_size: int,
-    seed: int,
+    seed: int | None,
     progress_bar: bool = True,
+    *,
+    sampler: str = "legacy",
+    backend: str = "auto",
+    max_workers: int | None = None,
 ):
     """Calculate p-values for an array of Average Precision (AP) scores using a null distribution.
+
+    The default uses the cached v0.6.0 null draws and counts values ``>= score``.
+    With ``sampler="streamed"``, Philox draws are processed in bounded chunks
+    without a cache and the comparison includes a rounding tolerance from
+    :func:`copairs.nulls.tie_thresholds`.
 
     Parameters
     ----------
@@ -629,19 +692,43 @@ def p_values(
         to generate corresponding null distributions.
     null_size : int
         Number of samples to generate in the null distribution for each configuration.
-    seed : int
-        Seed for the random number generator to ensure reproducibility of the null
-        distribution.
+    seed : int or None
+        Nonnegative seed for reproducibility. The streamed sampler requires
+        it to be below ``2**64``. See :func:`get_null_dists`.
     progress_bar : bool
         Whether or not to show tqdm's progress bar.
+    sampler : str
+        ``"legacy"`` (default) or ``"streamed"``.
+    backend : str
+        ``"auto"`` (default), ``"numba"`` or ``"numpy"``, see
+        :func:`get_null_dists`.
+    max_workers : int, optional
+        Threads for the streamed NumPy backend (default: the CPUs this process
+        may run on). The Numba backend uses Numba's threads, set by
+        ``NUMBA_NUM_THREADS`` or ``numba.set_num_threads``. P-values do not
+        depend on the threads.
 
     Returns
     -------
     np.ndarray
         An array of p-values corresponding to the input AP scores.
+        With the streamed sampler, configurations without positives get
+        p-values of 1.
     """
+    check_sampler(sampler, backend)
     # Identify unique configurations and their indices
     confs, rev_ix = np.unique(null_confs, axis=0, return_inverse=True)
+    if sampler == "streamed":
+        return _streamed_ap_pvalues(
+            ap_scores,
+            confs,
+            rev_ix,
+            null_size,
+            seed,
+            progress_bar,
+            backend,
+            max_workers,
+        )
 
     # Generate null distributions for each unique configuration
     null_dists = get_null_dists(confs, null_size, seed, progress_bar=progress_bar)
@@ -659,7 +746,28 @@ def p_values(
 
         # Calculate the p-value as the proportion of null scores >= observed score
         pvals[i] = (num + 1) / (null_size + 1)
+    return pvals
 
+
+def _streamed_ap_pvalues(
+    ap_scores, confs, rev_ix, null_size, seed, progress_bar, backend, max_workers
+):
+    """Compute AP p-values for each row against the streamed Philox null."""
+    rev_ix = rev_ix.ravel()
+    ranked = ~_without_positives(confs)
+    pvals = np.ones(len(rev_ix), dtype=np.float32)
+    rows = ranked[rev_ix]
+    index = np.cumsum(ranked) - 1  # configuration -> row of confs[ranked]
+    pvals[rows] = nulls.ap_pvalues(
+        np.asarray(ap_scores)[rows],
+        index[rev_ix[rows]],
+        confs[ranked],
+        null_size,
+        seed,
+        backend=backend,
+        progress_bar=progress_bar,
+        max_workers=max_workers,
+    )
     return pvals
 
 

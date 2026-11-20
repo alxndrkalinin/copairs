@@ -327,7 +327,10 @@ def test_noncomplete_positive_graph_against_independent_enumeration():
             scores.append(np.mean(np.arange(1, len(ranks) + 1) / ranks))
         expected.append(np.mean(scores))
     np.testing.assert_allclose(
-        permutation._group_maps_np(layout, assignments), expected, atol=1e-14, rtol=0
+        permutation._group_maps_np(layout.tables(0), assignments),
+        expected,
+        atol=1e-14,
+        rtol=0,
     )
     # Exercise the public path that formerly rejected this positive-only rule.
     got = get_map_pvalue(ap, ["g"], 200, progress_bar=False)

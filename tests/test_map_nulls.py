@@ -1,19 +1,29 @@
 """Tests for the choice of mAP null in copairs' mAP functions."""
 
+import os
+import sys
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
+import copairs
 import copairs.map.map as map_module
 from copairs import compute
 from copairs.map import (
+    multilabel,
     get_map_pvalue,
     average_precision,
     mean_average_precision,
     mean_average_precision_hierarchical,
 )
-from tests.helpers import ap_frame, query_meta
+from tests.helpers import ML_SPEC, ap_frame, query_meta
 from copairs.methods import NULLS
+from tests.test_nulls import run_python
 
 
 def test_copied_null_averages_configuration_nulls(tmp_path):
@@ -197,3 +207,429 @@ def test_hierarchical_takes_each_null():
         mean_average_precision_hierarchical(
             ap, sameby, hierarchical_by=["g"], null="exact", **kwargs
         )
+
+
+def plate_aps(groups=12, reps=3, ctrls=15, plates=3, seed=0):
+    """APs of ``groups`` with a replicate on each plate, ranked against its controls."""
+    rows = []
+    for p in range(plates):
+        rows += [(f"q{i}", p) for i in range(groups)] + [("ctrl", p)] * ctrls
+    meta = pd.DataFrame(rows, columns=["g", "plate"])
+    meta["ctrl"] = meta["g"] == "ctrl"
+    meta["ref"] = np.where(meta["ctrl"], np.arange(len(meta)), -1)
+    rng = np.random.default_rng(seed)
+    feats = rng.standard_normal((len(meta), 8))
+    signal = meta["g"].isin([f"q{i}" for i in range(0, groups, 3)]).to_numpy()
+    feats[signal] += 0.8
+    ap = average_precision(
+        meta, feats, ["g", "ref"], [], ["plate"], ["ctrl"], progress_bar=False
+    )
+    return ap[~ap["ctrl"]]
+
+
+def plate_label_aps(compounds=20, labels=6, plates=3, seed=0):
+    """Multilabel APs of ``labels`` targets, ranked against the same plate.
+
+    Holders of the first two targets share a shift; each compound also has
+    a label of its own, which makes no pairs.
+    """
+    rng = np.random.default_rng(seed)
+    has = rng.random((compounds * plates, labels)) < 0.15
+    meta = pd.DataFrame(
+        {
+            "target": [
+                [f"L{j}" for j in np.flatnonzero(h)] + [f"own{i}"]
+                for i, h in enumerate(has)
+            ],
+            "plate": np.repeat(np.arange(plates), compounds),
+        }
+    )
+    feats = rng.standard_normal((len(meta), 8))
+    feats += 0.8 * has[:, :2] @ rng.standard_normal((2, 8))
+    ap = multilabel.average_precision(
+        meta, feats, multilabel_col="target", progress_bar=False,
+        **dict(ML_SPEC, neg_sameby=["plate"]),
+    )  # fmt: skip
+    return ap[ap["target"].str.startswith("L")]
+
+
+@pytest.mark.parametrize("null", ["permutation", "joint"])
+def test_backends_give_identical_pvalues(null):
+    """The mAP nulls' p-values are bitwise identical on NumPy and Numba.
+
+    The copied null's: test_null_methods.test_backends_identical_through_public_api.
+    """
+    pytest.importorskip("numba")
+    ap = plate_aps()
+    kwargs = dict(null_size=3000, threshold=0.05, seed=7, progress_bar=False)
+    got = {
+        b: mean_average_precision(ap, ["g"], null=null, backend=b, **kwargs)
+        for b in ("numpy", "numba")
+    }
+    pd.testing.assert_frame_equal(got["numba"], got["numpy"])
+    assert 0 < got["numpy"]["below_p"].sum() < len(got["numpy"])
+
+
+def test_backends_give_identical_label_pvalues(monkeypatch):
+    """Multilabel groups' permutation p-values are bitwise identical on both backends.
+
+    The Numba backend runs its label kernels.
+    """
+    pytest.importorskip("numba")
+    from copairs.nulls import _numba
+
+    calls, maps = [], _numba.maps
+
+    def spy(kernels, *args):
+        calls.append(kernels[1] is _numba._label_maps)
+        return maps(kernels, *args)
+
+    monkeypatch.setattr(_numba, "maps", spy)
+    ap = plate_label_aps()
+    kwargs = dict(null_size=3000, threshold=0.05, seed=7, progress_bar=False)
+    got = {
+        b: mean_average_precision(ap, ["target"], backend=b, **kwargs)
+        for b in ("numpy", "numba")
+    }
+    pd.testing.assert_frame_equal(got["numba"], got["numpy"])
+    assert len(got["numpy"]) == 6
+    assert 0 < got["numpy"]["below_p"].sum() < len(got["numpy"])
+    assert calls and all(calls)  # the Numba run's draws ran in its label kernels
+
+
+def test_auto_backend_runs_numba_kernels(monkeypatch):
+    """With Numba importable, backend="auto" runs the joint and permutation kernels.
+
+    Multilabel groups run the permutation null's label kernels.
+    """
+    pytest.importorskip("numba")
+    from copairs.nulls import _numba
+
+    calls = []
+    joint_nulls, maps = _numba.joint_nulls, _numba.maps
+
+    def joint_spy(*args):
+        calls.append("joint")
+        return joint_nulls(*args)
+
+    def maps_spy(kernels, *args):
+        calls.append("label" if kernels[1] is _numba._label_maps else "permutation")
+        return maps(kernels, *args)
+
+    monkeypatch.setattr(_numba, "joint_nulls", joint_spy)
+    monkeypatch.setattr(_numba, "maps", maps_spy)
+    ap = plate_aps(groups=4)
+    kwargs = dict(null_size=500, threshold=0.05, seed=0, progress_bar=False)
+    labelled = plate_label_aps()
+    for null in ("joint", "permutation"):
+        mean_average_precision(ap, ["g"], null=null, backend="auto", **kwargs)
+    mean_average_precision(labelled, ["target"], backend="auto", **kwargs)
+    assert set(calls) == {"joint", "permutation", "label"}
+    calls.clear()
+    mean_average_precision(ap, ["g"], null="permutation", backend="numpy", **kwargs)
+    mean_average_precision(labelled, ["target"], backend="numpy", **kwargs)
+    assert calls == []
+
+
+@pytest.mark.parametrize("null", ["joint", "permutation"])
+def test_default_map_backend_uses_numpy_without_probing_numba(null, monkeypatch):
+    """Omitting the backend preserves the released NumPy path."""
+    from copairs.nulls import backend
+
+    def unexpected_probe():
+        raise AssertionError("default mAP calls must not probe optional backends")
+
+    monkeypatch.setattr(backend, "_available", unexpected_probe)
+    monkeypatch.setattr(backend, "_import_numba_backend", unexpected_probe)
+    ap = plate_aps(groups=4)
+    kwargs = dict(null_size=100, null=null, progress_bar=False, max_workers=1)
+    expected = get_map_pvalue(ap, ["g"], backend="numpy", **kwargs)
+    pd.testing.assert_frame_equal(get_map_pvalue(ap, ["g"], **kwargs), expected)
+
+
+# User threads run every null's Numba kernels at once on Numba's workqueue
+# threading layer, which aborts the process (SIGABRT) when two threads launch
+# parallel kernels concurrently.
+_CONCURRENT_NULLS = """
+import os
+os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
+os.environ["NUMBA_NUM_THREADS"] = "2"
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+import numba
+import numpy as np
+import pandas as pd
+from copairs import compute
+from copairs.map import multilabel, average_precision, mean_average_precision
+
+rows = []
+for p in range(3):
+    rows += [(f"q{i}", p) for i in range(12)] + [("ctrl", p)] * 15
+meta = pd.DataFrame(rows, columns=["g", "plate"])
+meta["ctrl"] = meta["g"] == "ctrl"
+meta["ref"] = np.where(meta["ctrl"], np.arange(len(meta)), -1)
+feats = np.random.default_rng(0).standard_normal((len(meta), 8))
+ap = average_precision(
+    meta, feats, ["g", "ref"], [], ["plate"], ["ctrl"], progress_bar=False
+)
+ap = ap[~ap["ctrl"]]
+confs = ap[["n_pos_pairs", "n_total_pairs"]].to_numpy()
+targets = [sorted({f"L{(i * 7 + p) % 6}", f"L{(i * 5 + 2 * p) % 6}"}) + [f"own{p}.{i}"]
+           for p in range(3) for i in range(20)]
+# Negatives on any plate: the label null takes its lone pairs from the
+# positives. Under other negative rules it finds them with DuckDB
+# (find_pairs_multilabel), whose default connection hangs when threads
+# query it at once.
+labelled = multilabel.average_precision(
+    pd.DataFrame({"target": targets}),
+    np.random.default_rng(1).standard_normal((60, 8)), ["target"], [], [],
+    ["target"], multilabel_col="target", progress_bar=False,
+)
+labelled = labelled[labelled["target"].str.startswith("L")]
+kw = dict(threshold=0.05, seed=0, progress_bar=False, backend="numba")
+calls = {
+    "joint": lambda: mean_average_precision(ap, ["g"], 20000, null="joint", **kw),
+    # 12 groups on 2 Numba threads: each group's kernel on its pool thread
+    "permutation": lambda: mean_average_precision(ap, ["g"], 20000, **kw),
+    # one group at a time: Numba's parallel kernel
+    "permutation-1": lambda: mean_average_precision(
+        ap, ["g"], 20000, max_workers=1, **kw
+    ),
+    "copied": lambda: mean_average_precision(
+        ap, ["g"], 20000, null="copied", sampler="streamed", **kw
+    ),
+    # 6 labels on 2 Numba threads, then one at a time, as "permutation"
+    "label": lambda: mean_average_precision(labelled, ["target"], 20000, **kw),
+    "label-1": lambda: mean_average_precision(
+        labelled, ["target"], 20000, max_workers=1, **kw
+    ),
+    "ap": lambda: compute.p_values(
+        ap["average_precision"].to_numpy(), confs, 20000, 0, progress_bar=False,
+        sampler="streamed", backend="numba",
+    ),
+}
+
+
+def pvalues(name):
+    out = calls[name]()
+    return np.asarray(out if name == "ap" else out["p_value"]).tolist()
+
+
+expected = {name: pvalues(name) for name in calls}
+names = [name for name in calls for _ in range(4)]
+barrier = threading.Barrier(len(calls))
+
+
+def run(name):
+    barrier.wait(timeout=120)
+    return pvalues(name)
+
+
+for _ in range(3):
+    with ThreadPoolExecutor(len(calls)) as ex:
+        got = list(ex.map(run, names))
+    assert got == [expected[name] for name in names]
+print(numba.threading_layer())
+"""
+
+
+def test_concurrent_calls_on_the_workqueue_layer():
+    """User threads may run the Numba nulls at once, on any threading layer.
+
+    Numba's workqueue layer (its fallback without TBB or OpenMP) aborts the
+    process when two threads launch parallel kernels concurrently, so they
+    launch one at a time; p-values match those of calls run alone.
+    """
+    pytest.importorskip("numba")
+    assert run_python(_CONCURRENT_NULLS).strip() == "workqueue"
+
+
+# P-values of the mAP nulls named in argv[2] on both backends, and the cache
+# hits and misses (compiles) of the Numba kernels, of a copy of copairs in
+# the directory argv[1]. The nulls named in argv[3] may fail their identity
+# check, as an edit to the head sort makes them.
+_MAP_CACHE_PROBE = """
+import sys, json
+import numba
+import numpy as np
+import pandas as pd
+import copairs
+from copairs.map import average_precision, mean_average_precision, multilabel
+from copairs.nulls import _numba
+
+assert copairs.__file__.startswith(sys.argv[1]), copairs.__file__
+rows = []
+for p in range(3):  # members with two positives, so the head sort counts
+    rows += [(f"q{i}", p) for i in range(4)] + [("ctrl", p)] * 6
+meta = pd.DataFrame(rows, columns=["g", "plate"])
+meta["ctrl"] = meta["g"] == "ctrl"
+meta["ref"] = np.where(meta["ctrl"], np.arange(len(meta)), -1)
+feats = np.random.default_rng(0).standard_normal((len(meta), 5))
+ap = average_precision(
+    meta, feats, ["g", "ref"], [], ["plate"], ["ctrl"], progress_bar=False
+)
+ap = ap[~ap["ctrl"]]
+targets = [sorted({f"L{(i * 7 + p) % 6}", f"L{(i * 5 + 2 * p) % 6}"}) + [f"own{p}.{i}"]
+           for p in range(3) for i in range(8)]
+labelled = multilabel.average_precision(
+    pd.DataFrame({"target": targets}),
+    np.random.default_rng(1).standard_normal((len(targets), 5)), ["target"], [], [],
+    ["target"], multilabel_col="target", progress_bar=False,
+)
+labelled = labelled[labelled["target"].str.startswith("L")]
+runs = {
+    "joint": (ap, ["g"], "joint", [None]),
+    # 4 groups on 2 Numba threads run the serial kernel, one at a time the parallel one
+    "permutation": (ap, ["g"], "permutation", [None, 1]),
+    "label": (labelled, ["target"], "permutation", [None, 1]),
+}
+broken = sys.argv[3].split(",")
+out = {}
+for name in sys.argv[2].split(","):
+    frame, by, null, workers = runs[name]
+    for backend in ("numba", "numpy"):
+        for w in workers:
+            try:
+                res = mean_average_precision(
+                    frame, by, 500, 0.05, 0, progress_bar=False, null=null,
+                    backend=backend, max_workers=w,
+                )
+            except ValueError as error:
+                if name not in broken or "in the AP table" not in str(error):
+                    raise
+                out[f"{name}/{backend}/{w}"] = "identity differs"
+                continue
+            out[f"{name}/{backend}/{w}"] = res["p_value"].tolist()
+kernels = {
+    name: f.stats for name, f in vars(_numba).items()
+    if isinstance(f, numba.core.registry.CPUDispatcher)
+}
+for stat in ("cache_hits", "cache_misses"):
+    counts = {name: sum(getattr(s, stat).values()) for name, s in kernels.items()}
+    out[stat] = {name: c for name, c in counts.items() if c}
+print(json.dumps(out))
+"""
+_MAP_NULLS = ("joint", "permutation", "label")
+# The Numba kernels the probe launches from Python.
+_MAP_KERNELS = (
+    "_joint_nulls", "_permutation_identity", "_permutation_maps",
+    "_permutation_maps_parallel", "_label_identity", "_label_maps",
+    "_label_maps_parallel",
+)  # fmt: skip
+
+
+def map_cache_probe(
+    root: Path, env: dict[str, str], nulls=_MAP_NULLS, broken=()
+) -> dict:
+    """Return the probe's output on the copy of copairs in ``root``."""
+    args = (str(root), ",".join(nulls), ",".join(broken))
+    return json.loads(run_python(_MAP_CACHE_PROBE, *args, cwd=root, env=env))
+
+
+def pvalues_of(out: dict) -> dict:
+    """Return the probe's p-values, by ``null/backend/max_workers``."""
+    return {k: v for k, v in out.items() if not k.startswith("cache_")}
+
+
+@pytest.fixture(scope="module")
+def cached_copy(tmp_path_factory):
+    """Copy copairs and fill a Numba cache with its mAP null kernels.
+
+    Returns ``(root, env, cold)``: the copy's directory, the environment
+    whose Numba cache it is, and the probe's output of the run that filled it.
+    """
+    pytest.importorskip("numba")
+    root = tmp_path_factory.mktemp("map_cache")
+    shutil.copytree(
+        Path(copairs.__file__).parent,
+        root / "copairs",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    env = {
+        **os.environ,
+        "NUMBA_CACHE_DIR": str(root / "numba_cache"),
+        "NUMBA_NUM_THREADS": "2",
+    }
+    return root, env, map_cache_probe(root, env)
+
+
+def test_numba_cache_loads_the_map_null_kernels(cached_copy):
+    """A process after one that compiled the mAP null kernels loads them all.
+
+    Every kernel it launches comes from the cache, and it compiles nothing:
+    functions that Numba builds in a factory are never loaded from the cache
+    when Python calls them, only as part of a kernel.
+    """
+    root, env, cold = cached_copy
+    assert all(cold["cache_misses"].get(k, 0) >= 1 for k in _MAP_KERNELS), cold
+    cached = map_cache_probe(root, env)
+    assert pvalues_of(cached) == pvalues_of(cold)
+    assert cached["cache_misses"] == {}
+    assert all(cached["cache_hits"].get(k, 0) >= 1 for k in _MAP_KERNELS), cached
+
+
+@pytest.mark.parametrize(
+    "name,old,new,changed,broken",
+    [
+        (
+            "joint.py",
+            "        return total / (m1 - m0)\n",
+            "        return 0.5 * total / (m1 - m0)\n",
+            ["joint"],
+            [],
+        ),
+        (
+            "permutation.py",
+            "        blk = 0\n",
+            "        blk = 1\n",
+            ["permutation", "label"],
+            [],
+        ),
+        (
+            "common.py",
+            "            while k >= 0 and vals[k] > v:\n",
+            "            while k >= 0 and vals[k] < v:\n",
+            ["joint"],
+            ["permutation", "label"],
+        ),
+    ],
+    ids=["joint", "permutation", "common"],
+)
+def test_numba_cache_follows_edits_to_compiled_files(
+    cached_copy, name, old, new, changed, broken
+):
+    """Cached mAP null kernels follow edits to the files of the functions they compile.
+
+    Numba checks a cached kernel only against its own file. The kernels
+    compile the factories of joint.py and permutation.py (single-label and
+    multilabel groups), the shared head sort of common.py, and Philox. After
+    an edit, the next process compiles every kernel again, so the edit
+    reaches the Numba p-values of the nulls that run the edited function; the
+    NumPy backend does not run these functions, so its p-values stay. The
+    edited head sort also changes the mAP that the permutation nulls' Numba
+    kernels give the observed labels, so it no longer matches the AP table
+    and those nulls raise. Once the file is restored, the kernels load from
+    the cache again.
+    """
+    root, env, cold = cached_copy
+    source = root / "copairs" / "nulls" / name
+    text = source.read_text()
+    assert text.count(old) >= 1
+    source.write_text(text.replace(old, new))
+    try:
+        edited = map_cache_probe(root, env, changed + broken, broken)
+    finally:
+        source.write_text(text)
+    for key, pvalues in pvalues_of(edited).items():
+        null, backend, _ = key.split("/")
+        if backend == "numpy":
+            assert pvalues == cold[key], key
+        elif null in broken:
+            assert pvalues == "identity differs", key
+        else:
+            assert pvalues != cold[key], key
+    assert edited["cache_hits"] == {}
+    restored = map_cache_probe(root, env)
+    assert pvalues_of(restored) == pvalues_of(cold)
+    assert restored["cache_misses"] == {}

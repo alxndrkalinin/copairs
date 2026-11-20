@@ -20,7 +20,9 @@ Draw ``j`` is defined by the scalar functions :func:`_make_kernels` builds:
 ``draw`` places pool profiles in the group's slots and ``group_map``
 recomputes the group's mAP from integer rank codes, with IEEE divisions and
 additions in a fixed order. :func:`_draws_np` and :func:`_group_maps_np`
-perform the same operations vectorized over draws and give identical mAPs.
+perform the same operations vectorized over draws (``backend="numpy"``), and
+:mod:`copairs.nulls._numba` runs the scalar functions compiled by Numba
+(``backend="numba"``); both give identical mAPs (tested).
 
 Every positive-size request runs all its Monte Carlo draws. Zero draws
 validate the layout and return untested statistical results.
@@ -29,11 +31,10 @@ A multilabel group (:func:`label_permutation_pvalues`) holds one label of a
 multilabel column, and its pools are whole components of the graph of
 negative pairs, members included: a draw moves the label to as many of each
 component's profiles as hold it there. :func:`_make_label_kernels` defines
-its draws, and :func:`_draws_pool_np` and :func:`_label_maps_np` are their
-vectorized twins.
+its draws, :func:`_draws_pool_np` and :func:`_label_maps_np` are their
+vectorized twins, and Numba compiles them as it does the single-label ones.
 """
 
-import os
 from typing import NamedTuple
 from operator import index as integer_index
 from collections import Counter, deque
@@ -64,6 +65,8 @@ from copairs.nulls.philox import (
     uniform_pair,
     make_uniform_pair,
 )
+from copairs.nulls.backend import resolve_backend, _import_numba_backend
+from copairs.nulls.sampler import _numpy_workers
 
 # A slot sorts up to this many drawn profiles by insertion, more by quicksort.
 _INSERTION = 128
@@ -87,11 +90,14 @@ RANK_POOL = 2**12
 # Elements of the per-slot arrays of one vectorized chunk of draws.
 _CHUNK_ELEMENTS = 2**22
 _FULL_TABLE = 2**20  # largest (code, code) table a layout gathers from
+# Most draws per task: the Numba kernels' draws per launch on Numba's
+# threads. Other tasks take fewer as groups grow (_draw_chunk), bounding the
+# NumPy backend's per-slot arrays and spreading a large group's draws over
+# the threads.
+_NUMBA_CHUNK = 2**16
 
 # Rank code of a NaN key: after every number.
 _NAN = np.uint32(0xFFFFFFFF)
-# The CPU count of ThreadPoolExecutor's default threads (3.13+: usable CPUs).
-_cpu_count = getattr(os, "process_cpu_count", os.cpu_count)
 
 
 def _make_count_less(jit=lambda f: f):
@@ -479,13 +485,14 @@ class _Pool:
 
 
 class _Layout:
-    """One group's slots, blocks and rank codes, as the draw functions take them.
+    """One group's slots, blocks and rank codes, as the scalar functions take them.
 
     Pool codes number the group's members ``0 .. n - 1`` (a member's code is
-    its slot) and then the pool's references.
+    its slot) and then the pool's references. The NumPy backend gathers from
+    further tables (:class:`_NumpyTables`).
     """
 
-    def __init__(self, members, edges, block_of, similarity, pool, draws=0):
+    def __init__(self, members, edges, block_of, similarity, pool):
         members = np.asarray(members, dtype=np.int64)
         block_of = np.asarray(block_of, dtype=np.int64)
         self.n = n = len(members)
@@ -526,11 +533,6 @@ class _Layout:
             rows[own, own] = _NAN
             rows.sort(axis=1)
             self.grow[self.gptr[codes][:, None] + np.arange(widths[b])] = rows
-        # The rows as one sorted array of (code, key) words, for one searchsorted.
-        code_of = np.repeat(
-            np.arange(len(widths[code_block]), dtype=np.uint64), widths[code_block]
-        )
-        self.gkeys = (code_of << np.uint64(32)) | self.grow.astype(np.uint64)
         if pool.ranked:
             self.rmu = _row_ranks(self.smr_ptr, _row_words(self.smr_ptr, self.smr), kmu)
             self.rcm = _row_ranks(
@@ -538,40 +540,6 @@ class _Layout:
             )
         else:
             self.rmu = self.rcm = np.zeros((0, 0), dtype=np.int32)
-        # Small layouts gather keys from one (code, code) table. A positive y
-        # of x is ranked after full_before[x, y] pool profiles (x's rank of y
-        # among references plus its block members before y); that table is
-        # built when ``draws`` draws gather more positives than it has
-        # entries, else ranks are gathered from a (code, code) rank table.
-        self.full_keys = self.full_ranks = self.full_before = None
-        m = n + len(pool.refs)
-        if m**2 <= _FULL_TABLE:
-            self.full_keys = _full_table(n, kmu, kmu.T[n:], pool.krr)
-            if pool.ranked:
-                self.full_ranks = _full_table(n, self.rmu, self.rcm, pool.rrr)
-            if pool.ranked and m**2 <= draws * int(self.deg.sum()):
-                x = np.repeat(np.arange(m), m)
-                word = (x.astype(np.uint64) << np.uint64(32)) | self.full_keys.ravel()
-                members_before = np.searchsorted(self.gkeys, word) - self.gptr[x]
-                before = self.full_ranks.ravel() + members_before
-                self.full_before, self.full_ranks = before.reshape(m, m), None
-        # Slots each slot's rank list counts: its positives and its block.
-        self.counted = [
-            np.flatnonzero(
-                (np.arange(n) != s) & (adjm[s] | (block_of == block_of[s]))
-            ).astype(np.int64)
-            for s in range(n)
-        ]
-        # Each code's sorted reference codes, for searches where no rank
-        # tables replace them.
-        if not pool.ranked:
-            self.rows = np.concatenate([self.smr, pool.srr])
-            self.row_lo = np.concatenate(
-                [self.smr_ptr[:-1], len(self.smr) + pool.srr_ptr[:-1]]
-            )
-            self.row_hi = np.concatenate(
-                [self.smr_ptr[1:], len(self.smr) + pool.srr_ptr[1:]]
-            )
 
     def draw_args(self):
         """Arguments of the scalar ``draw`` after ``j``, before the keys."""
@@ -594,13 +562,78 @@ class _Layout:
             self.rmu, self.rcm, pool.rrr, pool.ranked,
         )  # fmt: skip
 
-    def chunk(self):
-        """Draws per vectorized chunk, bounding the per-slot arrays."""
-        return _draw_chunk(self.n)
+    def kernel_args(self, k0, k1):
+        """Arguments of the Numba draw kernels before ``start``, given the keys."""
+        # map_args after n, which draw_args starts with
+        return (*self.draw_args(), k0, k1, *self.map_args()[1:])
+
+    def tables(self, draws):
+        """Return the NumPy backend's :class:`_NumpyTables` for ``draws`` draws."""
+        return _NumpyTables(self, draws)
+
+    @staticmethod
+    def compiled(kernels):
+        """``(identity, serial, parallel)`` kernels of :mod:`copairs.nulls._numba`."""
+        return (
+            kernels._permutation_identity,
+            kernels._permutation_maps,
+            kernels._permutation_maps_parallel,
+        )
+
+
+class _NumpyTables:
+    """The tables :func:`_group_maps_np` gathers from besides its layout's.
+
+    Built for ``draws`` draws of the layout's group: given enough, the ranks
+    of a small layout come with its drawn block members before them.
+    """
+
+    def __init__(self, layout, draws):
+        self.layout = layout
+        n, pool = layout.n, layout.pool
+        adjm, block_of = layout.adjm, layout.slot_block
+        # The rows as one sorted array of (code, key) words, for one searchsorted.
+        gwidths = np.diff(layout.gptr)
+        code_of = np.repeat(np.arange(len(gwidths), dtype=np.uint64), gwidths)
+        self.gkeys = (code_of << np.uint64(32)) | layout.grow.astype(np.uint64)
+        # Small layouts gather keys from one (code, code) table. A positive y
+        # of x is ranked after full_before[x, y] pool profiles (x's rank of y
+        # among references plus its block members before y); that table is
+        # built when ``draws`` draws gather more positives than it has
+        # entries, else ranks are gathered from a (code, code) rank table.
+        self.full_keys = self.full_ranks = self.full_before = None
+        m = n + len(pool.refs)
+        if m**2 <= _FULL_TABLE:
+            self.full_keys = _full_table(n, layout.kmu, layout.kmu.T[n:], pool.krr)
+            if pool.ranked:
+                self.full_ranks = _full_table(n, layout.rmu, layout.rcm, pool.rrr)
+            if pool.ranked and m**2 <= draws * int(layout.deg.sum()):
+                x = np.repeat(np.arange(m), m)
+                word = (x.astype(np.uint64) << np.uint64(32)) | self.full_keys.ravel()
+                members_before = np.searchsorted(self.gkeys, word) - layout.gptr[x]
+                before = self.full_ranks.ravel() + members_before
+                self.full_before, self.full_ranks = before.reshape(m, m), None
+        # Slots each slot's rank list counts: its positives and its block.
+        self.counted = [
+            np.flatnonzero(
+                (np.arange(n) != s) & (adjm[s] | (block_of == block_of[s]))
+            ).astype(np.int64)
+            for s in range(n)
+        ]
+        # Each code's sorted reference codes, for searches where no rank
+        # tables replace them.
+        if not pool.ranked:
+            self.rows = np.concatenate([layout.smr, pool.srr])
+            self.row_lo = np.concatenate(
+                [layout.smr_ptr[:-1], len(layout.smr) + pool.srr_ptr[:-1]]
+            )
+            self.row_hi = np.concatenate(
+                [layout.smr_ptr[1:], len(layout.smr) + pool.srr_ptr[1:]]
+            )
 
     def draws(self, start, size, k0, k1):
         """``pm`` of draws ``start, ...`` (:func:`_draws_np`)."""
-        return _draws_np(self, start, size, k0, k1)
+        return _draws_np(self.layout, start, size, k0, k1)
 
     def maps(self, pm):
         """Return the mAP of each draw in ``pm`` (:func:`_group_maps_np`)."""
@@ -608,8 +641,8 @@ class _Layout:
 
 
 def _draw_chunk(n):
-    """Draws per vectorized chunk of a group of ``n`` members."""
-    return int(min(2**16, max(256, _CHUNK_ELEMENTS // max(n * n, 1))))
+    """Draws per task of a group of ``n`` members: per vectorized NumPy chunk."""
+    return int(min(_NUMBA_CHUNK, max(256, _CHUNK_ELEMENTS // max(n * n, 1))))
 
 
 def _uniforms_np(c0, c1, count, k0, k1):
@@ -709,39 +742,43 @@ def _count_less_np(row, lo, hi, key):
     return lo
 
 
-def _group_maps_np(layout, pm):
-    """Return the mAP of each draw in ``pm`` (one row each), as ``group_map``."""
+def _group_maps_np(tables, pm):
+    """Return the mAP of each draw in ``pm`` (one row each), as ``group_map``.
+
+    ``tables`` are the :class:`_NumpyTables` of the group's layout.
+    """
+    layout = tables.layout
     n, size = layout.n, len(pm)
     pool = layout.pool
     kmu_t = np.ascontiguousarray(layout.kmu.T)  # (pool code, member) -> key
     total = np.zeros(size)
     for s in range(n):
         b = layout.slot_block[s]
-        slots = layout.counted[s]
+        slots = tables.counted[s]
         x = pm[:, s][:, None]
-        if layout.full_keys is None:
+        if tables.full_keys is None:
             keys = _pair_table(x, pm[:, slots], n, layout.kmu, kmu_t[n:], pool.krr)
         else:
-            keys = _gather(layout.full_keys, x, pm[:, slots])
+            keys = _gather(tables.full_keys, x, pm[:, slots])
         k, t = _rank_entries(keys, slots)
         # Drawn block profiles ranked strictly before each entry's key.
         drawn = _drawn_before(k, layout.slot_block[t] == b)
         cols, yp = _positives(layout, s, t, pm)
         xp = np.broadcast_to(x, yp.shape)
-        if layout.full_before is not None:
-            before = _gather(layout.full_before, xp, yp)
+        if tables.full_before is not None:
+            before = _gather(tables.full_before, xp, yp)
         else:
             kp = np.take_along_axis(k, cols, axis=1)
-            if layout.full_ranks is not None:
-                before = _gather(layout.full_ranks, xp, yp)
+            if tables.full_ranks is not None:
+                before = _gather(tables.full_ranks, xp, yp)
             elif pool.ranked:
                 before = _pair_table(xp, yp, n, layout.rmu, layout.rcm, pool.rrr)
             else:
-                lo = layout.row_lo[xp]
-                before = _count_less_np(layout.rows, lo, layout.row_hi[xp], kp) - lo
+                lo = tables.row_lo[xp]
+                before = _count_less_np(tables.rows, lo, tables.row_hi[xp], kp) - lo
             # Block members x ranks before the key: count_less on its sorted g-row.
             word = (xp.astype(np.uint64) << np.uint64(32)) | kp
-            before = before + (np.searchsorted(layout.gkeys, word) - layout.gptr[xp])
+            before = before + (np.searchsorted(tables.gkeys, word) - layout.gptr[xp])
         total += _mean_precision(before - np.take_along_axis(drawn, cols, axis=1))
     return total / n
 
@@ -909,29 +946,49 @@ def _label_key(seed: int, members, label) -> tuple[np.uint64, np.uint64]:
 class _Run:
     """One group's draws on its layout (``_Layout`` or ``_LabelLayout``).
 
-    ``key`` is the Philox key of the group's draws. ``identity`` is the
-    observed labels' mAP, recomputed from the pairs, and ``thr`` its
-    :func:`~copairs.nulls.common.tie_thresholds`.
+    ``key`` is the Philox key of the group's draws. Under ``backend="numpy"``
+    they run vectorized on the layout's NumPy tables, built for ``draws``
+    draws; under ``"numba"`` the compiled scalar functions run them, on
+    Numba's threads if ``parallel``, else on the calling thread. ``identity``
+    is the observed labels' mAP, recomputed from the pairs, ``thr`` its
+    :func:`~copairs.nulls.common.tie_thresholds`, and ``chunk`` the draws
+    per task: ``_NUMBA_CHUNK`` on Numba's threads, else :func:`_draw_chunk`,
+    so a large group's tasks spread over the calling threads.
     """
 
-    def __init__(self, layout, key):
+    def __init__(self, layout, key, backend="numpy", draws=0, parallel=True):
         self.layout = layout
         self.key = key
-        self.identity = float(layout.maps(layout.identity[None])[0])
+        self.chunk = _draw_chunk(layout.n)
+        if backend == "numba":
+            numba_backend = _import_numba_backend()
+            kernels = layout.compiled(numba_backend)
+            self.identity = numba_backend.identity_map(kernels, layout)
+            if parallel:
+                self.chunk = _NUMBA_CHUNK
+            self._maps = lambda start, size: numba_backend.maps(
+                kernels, layout, start, size, *key, parallel
+            )
+        else:
+            tables = layout.tables(draws)
+            self.identity = float(tables.maps(layout.identity[None])[0])
+            self._maps = lambda start, size: tables.maps(
+                tables.draws(start, size, *key)
+            )
         self.thr = float(tie_thresholds(self.identity))
 
     def maps_of(self, start, size):
         """Return the mAPs of draws ``start, ..., start + size - 1``."""
-        return self.layout.maps(self.layout.draws(start, size, *self.key))
+        return self._maps(start, size)
 
     def count(self, null_size, out=None):
         """``(count, draws)`` after every requested draw, as :func:`_count_hits`."""
-        return _count_hits(self.maps_of, null_size, self.thr, self.layout.chunk(), out)
+        return _count_hits(self.maps_of, null_size, self.thr, self.chunk, out)
 
 
 def permutation_null(
     members, edges, blocks, block_of, similarity, null_size, seed, pool=None,
-    out=None,
+    out=None, *, backend="numpy", parallel=True,
 ):  # fmt: skip
     """Run ``null_size`` label permutations of one group.
 
@@ -939,12 +996,16 @@ def permutation_null(
     the observed labels' (``identity``, within
     :func:`~copairs.nulls.common.tie_thresholds`' tolerance), that mAP,
     and the reference pool, reusable by groups ranking the same references.
-    ``out`` receives the draws' mAPs if given.
+    ``out`` receives the draws' mAPs if given. ``backend`` is ``"numpy"``
+    (default), ``"numba"`` or ``"auto"``, with identical draws and mAPs
+    (:func:`~copairs.nulls.resolve_backend`). Under Numba, ``parallel``
+    runs the draws on Numba's threads, else on the calling thread.
     """
+    backend = resolve_backend(backend)
     if pool is None or not pool.matches(blocks):
         pool = _Pool(blocks, similarity)
-    layout = _Layout(members, edges, block_of, similarity, pool, int(null_size))
-    run = _Run(layout, group_key(seed, members))
+    layout = _Layout(members, edges, block_of, similarity, pool)
+    run = _Run(layout, group_key(seed, members), backend, int(null_size), parallel)
     count, _ = run.count(int(null_size), out=out)
     return count, run.identity, pool
 
@@ -1050,7 +1111,7 @@ def permutation_pvalues(
     groups, profile, num_pos, num_total, pos_pairs, neg_pairs, similarity,
     null_size, seed, observed=None, progress_bar=False, max_workers=None,
     max_reference_profiles=MAX_POOL, pool_memory_budget=POOL_BUDGET,
-    key_table_memory_budget=KEY_TABLE_BUDGET,
+    key_table_memory_budget=KEY_TABLE_BUDGET, *, backend="numpy",
 ):  # fmt: skip
     """P-value of each group's mAP against its label permutations.
 
@@ -1079,12 +1140,15 @@ def permutation_pvalues(
     progress_bar : bool
         Whether to show a progress bar over groups.
     max_workers : int, optional
-        Threads that run the groups' draws (default: ``ThreadPoolExecutor``'s),
-        a group's chunks of draws on several threads at once, and at most this
-        many groups at a time. Each group's p-value depends only on its own
-        draws, so results do not depend on it. The pools built at once hold
-        at most ``POOL_BUDGET`` (4 GiB) of estimated key and rank tables, or
-        one pool if it alone is larger.
+        Threads that run the groups' draws (default: the CPUs this process
+        may run on, at most 32), a group's chunks of draws on several threads
+        at once, and at most this many groups at a time. Each group's p-value
+        depends only on its own draws, so results do not depend on it. The
+        pools built at once hold at most ``pool_memory_budget`` of estimated
+        key and rank tables, or one pool if it alone is larger. Under the
+        Numba backend each thread runs its draws, unless fewer groups run at
+        once than Numba has threads (``NUMBA_NUM_THREADS``): then each
+        group's draws run on Numba's threads, one launch at a time.
     max_reference_profiles : int
         Maximum total references across a group's blocks (default 16,384).
     pool_memory_budget : int
@@ -1093,6 +1157,9 @@ def permutation_pvalues(
     key_table_memory_budget : int
         Byte limit for the optional shared key table (default 256 MiB).
         Zero disables sharing.
+    backend : str
+        ``"numpy"`` (default), ``"numba"`` or ``"auto"``. See
+        :func:`permutation_null` for the available engines.
 
     Returns
     -------
@@ -1107,6 +1174,7 @@ def permutation_pvalues(
             max_reference_profiles, pool_memory_budget, key_table_memory_budget
         )
     )
+    backend = resolve_backend(backend)
     profile = np.asarray(profile, dtype=np.int64)
     num_pos = np.asarray(num_pos, dtype=np.int64)
     num_neg = np.asarray(num_total, dtype=np.int64) - num_pos
@@ -1126,22 +1194,24 @@ def permutation_pvalues(
     def build(g, table):
         return _Pool(layouts[g][2], similarity, table, max_reference_profiles)
 
-    def start(g, pool):
+    def start(g, pool, parallel):
         members, edges, _, block_of = layouts[g]
-        layout = _Layout(members, edges, block_of, similarity, pool, null_size)
-        run = _Run(layout, group_key(seed, members))
+        layout = _Layout(members, edges, block_of, similarity, pool)
+        run = _Run(layout, group_key(seed, members), backend, null_size, parallel)
         _check_identity(g, run.identity, observed)
         return run
 
     return _run_groups(
         keys, refs, similarity, build, lambda g: _pool_bytes(layouts[g][2]), start,
-        null_size, progress_bar, max_workers, pool_memory_budget, key_table_memory_budget,
+        null_size, progress_bar, max_workers, pool_memory_budget,
+        key_table_memory_budget, backend,
     )  # fmt: skip
 
 
 def _run_groups(
     keys, refs, similarity, build, nbytes, start, null_size,
     progress_bar, max_workers, pool_memory_budget, key_table_memory_budget,
+    backend,
 ):  # fmt: skip
     """P-value of each group of a permutation null, its draws run on threads.
 
@@ -1149,20 +1219,35 @@ def _run_groups(
     named pool. ``build(g, table)`` builds group ``g``'s pool, slicing its
     keys from ``table`` (a ``_KeyTable`` of all pools' profiles, or None),
     ``nbytes(g)`` estimates the pool's bytes (:class:`_SharedPools`), and
-    ``start(g, pool)`` returns the group's ``_Run``.
+    ``start(g, pool, parallel)`` returns the group's ``_Run`` on the
+    resolved ``backend``, its Numba draws on Numba's threads if
+    ``parallel``.
     """
-    if max_workers is None:  # ThreadPoolExecutor's default
-        max_workers = min(32, (_cpu_count() or 1) + 4)
+    pool = {}
+    if backend == "numba":
+        numba_backend = _import_numba_backend()
+        threads = numba_backend.threads()
+        # A thread per Numba thread. Groups' draws run on their pool threads
+        # when those keep Numba's threads busy, else on Numba's threads,
+        # which the pool threads set as the caller has (it is per thread).
+        workers = threads if max_workers is None else max_workers
+        parallel = min(len(keys), workers) < threads
+        pool = dict(initializer=numba_backend.set_threads, initargs=(threads,))
+    else:
+        # A thread per CPU; at most 32, since each holds a chunk's draws.
+        workers = min(32, _numpy_workers()) if max_workers is None else max_workers
+        parallel = False
     pvals = np.empty(len(keys), dtype=np.float64)
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+    with ThreadPoolExecutor(max_workers=workers, **pool) as ex:
         try:
             # Pools ranking overlapping profiles slice one key table.
             table = _key_table(
                 list(refs.values()), similarity, ex.map, key_table_memory_budget
             )
             done = _schedule(
-                ex, max_workers, keys, lambda g: build(g, table), nbytes, start,
-                null_size, pool_memory_budget,
+                ex, workers, keys, lambda g: build(g, table), nbytes,
+                lambda g, pool: start(g, pool, parallel), null_size,
+                pool_memory_budget,
             )  # fmt: skip
             for g, p in progress(done, len(keys), progress_bar, "permutation null"):
                 pvals[g] = p
@@ -1227,7 +1312,7 @@ def _schedule(ex, workers, keys, build, nbytes, start, null_size, pool_memory_bu
             if step == "start":
                 runs[g] = (
                     result,
-                    _Hits(null_size, result.thr, result.layout.chunk()),
+                    _Hits(null_size, result.thr, result.chunk),
                 )
                 done = runs[g][1].done
                 if not done:
@@ -1431,9 +1516,12 @@ def _label_pool_bytes(p, n_neg):
 
 
 class _LabelLayout:
-    """One multilabel group's slots and codes, as the label draw functions take them."""
+    """One multilabel group's slots and codes, as the label draw functions take them.
 
-    def __init__(self, members, edges, lone, block_of, pool, draws=0):
+    The NumPy backend gathers from further tables (:class:`_LabelNumpyTables`).
+    """
+
+    def __init__(self, members, edges, lone, block_of, pool):
         self.n = n = len(members)
         self.pool = pool
         self.member_code = pool.code[np.asarray(members, dtype=np.int64)]
@@ -1450,23 +1538,6 @@ class _LabelLayout:
         rows = [np.sort(codes[i, self.lone[i]]) for i in range(n)]
         self.gptr = np.cumsum([0] + [len(r) for r in rows]).astype(np.int64)
         self.grow = np.concatenate(rows).astype(np.uint32)
-        # The rows as one sorted array of (member, code) words, for one searchsorted.
-        self.gwords = _row_words(self.gptr, self.grow)
-        # A positive y of a drawn profile that is member i ranks after
-        # lone_before[i, y] of i's lone partners (row n: other profiles have
-        # none). The table is built when ``draws`` draws gather more
-        # positives than it has entries; else the counts are searched in
-        # gwords.
-        self.lone_before = None
-        p = len(pool.profiles)
-        if (n + 1) * p <= min(_FULL_TABLE, draws * int(self.deg.sum())):
-            word = (
-                np.arange(n, dtype=np.uint64)[:, None] << np.uint64(32)
-            ) | pool.keys[self.member_code].astype(np.uint64)
-            self.lone_before = np.zeros((n + 1, p), dtype=np.int32)
-            self.lone_before[:n] = (
-                np.searchsorted(self.gwords, word) - self.gptr[:-1, None]
-            )
 
     def draw_args(self):
         """Arguments of the scalar ``draw_pool`` after ``j``, before the keys."""
@@ -1481,13 +1552,54 @@ class _LabelLayout:
             pool.nrow, pool.nbits, self.loc, self.lone, self.gptr, self.grow,
         )  # fmt: skip
 
-    def chunk(self):
-        """Draws per vectorized chunk, bounding the per-slot arrays."""
-        return _draw_chunk(self.n)
+    def kernel_args(self, k0, k1):
+        """Arguments of the Numba draw kernels before ``start``, given the keys."""
+        return (*self.draw_args(), k0, k1, *self.map_args())
+
+    def tables(self, draws):
+        """Return the NumPy backend's :class:`_LabelNumpyTables` for ``draws`` draws."""
+        return _LabelNumpyTables(self, draws)
+
+    @staticmethod
+    def compiled(kernels):
+        """``(identity, serial, parallel)`` kernels of :mod:`copairs.nulls._numba`."""
+        return (
+            kernels._label_identity,
+            kernels._label_maps,
+            kernels._label_maps_parallel,
+        )
+
+
+class _LabelNumpyTables:
+    """The tables :func:`_label_maps_np` gathers from besides its layout's.
+
+    Built for ``draws`` draws of the layout's group (:class:`_NumpyTables`).
+    """
+
+    def __init__(self, layout, draws):
+        self.layout = layout
+        n, pool = layout.n, layout.pool
+        # The rows as one sorted array of (member, code) words, for one searchsorted.
+        self.gwords = _row_words(layout.gptr, layout.grow)
+        # A positive y of a drawn profile that is member i ranks after
+        # lone_before[i, y] of i's lone partners (row n: other profiles have
+        # none). The table is built when ``draws`` draws gather more
+        # positives than it has entries; else the counts are searched in
+        # gwords.
+        self.lone_before = None
+        p = len(pool.profiles)
+        if (n + 1) * p <= min(_FULL_TABLE, draws * int(layout.deg.sum())):
+            word = (
+                np.arange(n, dtype=np.uint64)[:, None] << np.uint64(32)
+            ) | pool.keys[layout.member_code].astype(np.uint64)
+            self.lone_before = np.zeros((n + 1, p), dtype=np.int32)
+            self.lone_before[:n] = (
+                np.searchsorted(self.gwords, word) - layout.gptr[:-1, None]
+            )
 
     def draws(self, start, size, k0, k1):
         """``pm`` of draws ``start, ...`` (:func:`_draws_pool_np`)."""
-        return _draws_pool_np(self, start, size, k0, k1)
+        return _draws_pool_np(self.layout, start, size, k0, k1)
 
     def maps(self, pm):
         """Return the mAP of each draw in ``pm`` (:func:`_label_maps_np`)."""
@@ -1508,8 +1620,12 @@ def _draws_pool_np(layout, start, size, k0, k1):
     return pm
 
 
-def _label_maps_np(layout, pm):
-    """Return the mAP of each draw in ``pm`` (one row each), as ``label_group_map``."""
+def _label_maps_np(tables, pm):
+    """Return the mAP of each draw in ``pm`` (one row each), as ``label_group_map``.
+
+    ``tables`` are the :class:`_LabelNumpyTables` of the group's layout.
+    """
+    layout = tables.layout
     n, size = layout.n, len(pm)
     pool = layout.pool
     total = np.zeros(size)
@@ -1536,12 +1652,12 @@ def _label_maps_np(layout, pm):
             lo = pool.nptr[xp]
             before = _count_less_np(pool.nrow, lo, pool.nptr[xp + 1], kp) - lo
         # Members sharing only the label ranked before the key: x's sorted g-row.
-        if layout.lone_before is not None:
-            before = before + _gather(layout.lone_before, np.where(lx >= 0, lx, n), yp)
+        if tables.lone_before is not None:
+            before = before + _gather(tables.lone_before, np.where(lx >= 0, lx, n), yp)
         else:
             lxp = np.broadcast_to(np.maximum(lx, 0), kp.shape)
             word = (lxp.astype(np.uint64) << np.uint64(32)) | kp
-            lone_before = np.searchsorted(layout.gwords, word) - layout.gptr[lxp]
+            lone_before = np.searchsorted(tables.gwords, word) - layout.gptr[lxp]
             before = before + np.where(lx >= 0, lone_before, 0)
         total += _mean_precision(before - np.take_along_axis(drawn, cols, axis=1))
     return total / n
@@ -1695,19 +1811,25 @@ def _local_pairs(found, segments, key, local, label):
     return ends
 
 
-def _label_run(members, edges, lone, comps, block_of, key, pool, seed, draws=0):
+def _label_run(
+    members, edges, lone, comps, block_of, key, pool, seed, draws=0,
+    backend="numpy", parallel=True,
+):  # fmt: skip
     """Return a multilabel group's ``_Run`` on ``pool``, the ``_LabelPool`` of its ``comps``.
 
-    ``draws`` is the number of draws it will run (:class:`_LabelLayout`).
+    ``draws`` is the number of draws it will run (:class:`_LabelNumpyTables`);
+    ``backend`` and ``parallel`` as in :class:`_Run`.
     """
-    layout = _LabelLayout(members, edges, lone, block_of, pool, draws)
-    return _Run(layout, _label_key(seed, members, key))
+    layout = _LabelLayout(members, edges, lone, block_of, pool)
+    key = _label_key(seed, members, key)
+    return _Run(layout, key, backend, draws, parallel)
 
 
 def label_permutation_pvalues(
     groups, rows, num_pos, num_total, pairs, null_size, seed, observed=None,
     progress_bar=False, max_workers=None, max_reference_profiles=MAX_POOL,
     pool_memory_budget=POOL_BUDGET, key_table_memory_budget=KEY_TABLE_BUDGET,
+    *, backend="numpy",
 ):  # fmt: skip
     """P-value of each multilabel group's mAP against moves of its label.
 
@@ -1726,7 +1848,7 @@ def label_permutation_pvalues(
     rows : np.ndarray
         The AP table's index (rows of ``pairs["profile"]``), which also gives
         each row's label (``pairs["row_key"]``).
-    num_pos, num_total, null_size, seed, observed, progress_bar, max_workers
+    num_pos, num_total, null_size, seed, observed, progress_bar, max_workers, backend
         As in :func:`permutation_pvalues`; pools are components' profiles.
     pairs : dict
         Original positive graph, negatives, row mapping and similarities.
@@ -1749,6 +1871,7 @@ def label_permutation_pvalues(
             max_reference_profiles, pool_memory_budget, key_table_memory_budget
         )
     )
+    backend = resolve_backend(backend)
     num_pos = np.asarray(num_pos, dtype=np.int64)
     num_neg = np.asarray(num_total, dtype=np.int64) - num_pos
     groups = [np.asarray(ix, dtype=np.int64) for ix in groups]
@@ -1775,8 +1898,8 @@ def label_permutation_pvalues(
             comps, comp_profiles, nbr_ptr, nbr, pairs["similarity"], table
         )
 
-    def start(g, pool):
-        run = _label_run(*layouts[g], pool, seed, null_size)
+    def start(g, pool, parallel):
+        run = _label_run(*layouts[g], pool, seed, null_size, backend, parallel)
         _check_identity(g, run.identity, observed)
         return run
 
@@ -1787,4 +1910,5 @@ def label_permutation_pvalues(
     return _run_groups(
         keys, refs, pairs["similarity"], build, pool_bytes, start, null_size,
         progress_bar, max_workers, pool_memory_budget, key_table_memory_budget,
+        backend,
     )  # fmt: skip

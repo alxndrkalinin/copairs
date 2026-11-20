@@ -6,8 +6,9 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from copairs import compute
+from copairs import nulls, compute
 from copairs.nulls import joint, common, permutation
+from copairs.nulls import backend as backend_module
 
 COMPLETE4 = [(i, j) for i in range(4) for j in range(i + 1, 4)]
 SIGNATURES = [
@@ -20,6 +21,7 @@ SIGNATURES = [
     ([(40, 5000), (40, 3000)], [(0, 1)]),
     ([(5, 20_000)] * 3, [(0, 1), (0, 2), (1, 2)]),
 ]
+BACKENDS = nulls.available_backends()
 
 
 def null_of(members, edges, size, seed=0, start=0):
@@ -80,11 +82,84 @@ def scalar_nulls(plan, size, start):
     )
 
 
-def test_vectorized_matches_scalar_draws():
-    """The NumPy sampler returns the scalar sampler's samples, bit for bit."""
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_vectorized_matches_scalar_draws(backend):
+    """Each backend returns the scalar sampler's samples, bit for bit."""
     plan = joint.joint_plan([joint.canonical_signature(*sig) for sig in SIGNATURES], 7)
-    got = joint.joint_nulls(plan, 300, start=2**33 - 100)
+    got = joint.joint_nulls(plan, 300, start=2**33 - 100, backend=backend)
     np.testing.assert_array_equal(got, scalar_nulls(plan, 300, 2**33 - 100))
+
+
+def random_signatures(rng, count):
+    """Signatures of 1-6 members with random pair counts and edge sets."""
+    sigs = set()
+    while len(sigs) < count:
+        n = int(rng.integers(1, 7))
+        edges = [
+            (i, j) for i in range(n) for j in range(i + 1, n) if rng.random() < 0.6
+        ]
+        degree = np.bincount(np.ravel(edges), minlength=n) if edges else np.zeros(n)
+        members = [
+            (int(d + rng.integers(0 if d else 1, 60)), int(rng.integers(0, 5000)))
+            for d in degree
+        ]
+        sigs.add(joint.canonical_signature(members, edges))
+    return sorted(sigs)
+
+
+def test_numba_matches_numpy_draws():
+    """Numba's sample of every (signature, j) is NumPy's, bit for bit.
+
+    The signatures cover both binomial branches (inversion and BTRS), insertion
+    and quick sorts, and counters on both sides of the 32-bit word boundary.
+    """
+    pytest.importorskip("numba")
+    sigs = sorted(
+        {joint.canonical_signature(*sig) for sig in SIGNATURES}
+        | set(random_signatures(np.random.default_rng(3), 40))
+    )
+    plan = joint.joint_plan(sigs, 2**64 - 5)
+    start = 2**32 - 1000
+    numpy = joint.joint_nulls(plan, 3000, start, backend="numpy")
+    numba = joint.joint_nulls(plan, 3000, start, backend="numba")
+    assert numba.shape == (len(sigs), 3000)
+    np.testing.assert_array_equal(numba, numpy)
+    rows = slice(len(sigs) - 2, 3, -5)  # any slice of signatures
+    np.testing.assert_array_equal(
+        joint.joint_nulls(plan, 3000, start, rows, backend="numba"), numpy[rows]
+    )
+
+
+@pytest.mark.parametrize("batch_bytes", [8 * 200 * 2, 8 * 200 * 5, 2**26])
+def test_numba_samples_batches_of_signatures(batch_bytes, monkeypatch):
+    """Numba samples a chunk of a batch of used signatures per launch.
+
+    Batches of 2, 5 or all 11 used signatures (signature 0 has no group)
+    over 3 chunks give the NumPy backend's p-values.
+    """
+    pytest.importorskip("numba")
+    from copairs.nulls import _numba
+
+    sigs = random_signatures(np.random.default_rng(8), 12)
+    sig_ix = np.repeat(np.arange(1, len(sigs)), 2)
+    scores = np.random.default_rng(2).random(len(sig_ix)) / 2
+    expected = joint.joint_pvalues(scores, sig_ix, sigs, 500, 4, backend="numpy")
+    launches = []
+    kernel = _numba.joint_nulls
+
+    def recorded(*args):
+        launches.append(args[-3].tolist())  # the signatures
+        kernel(*args)
+
+    monkeypatch.setattr(_numba, "joint_nulls", recorded)
+    monkeypatch.setattr(joint, "_CHUNK", 200)  # chunks of 200, 200 and 100
+    monkeypatch.setattr(joint, "_BATCH_BYTES", batch_bytes)
+    got = joint.joint_pvalues(scores, sig_ix, sigs, 500, 4, backend="numba")
+    np.testing.assert_array_equal(got, expected)
+    batch = batch_bytes // (8 * 200)
+    used = list(range(1, len(sigs)))
+    batches = [used[b : b + batch] for b in range(0, len(used), batch)]
+    assert launches == batches * 3
 
 
 @pytest.mark.parametrize(
@@ -106,7 +181,7 @@ def test_chunks_bound_the_per_sample_arrays(monkeypatch):
         joint.canonical_signature(*SIGNATURES[3]),
     ]
     plan = joint.joint_plan(sigs, 5)
-    expected = joint.joint_nulls(plan, 500, start=11)
+    expected = joint.joint_nulls(plan, 500, start=11, backend="numpy")
     sizes = []
     full = joint._joint_null_np
 
@@ -118,21 +193,68 @@ def test_chunks_bound_the_per_sample_arrays(monkeypatch):
 
     monkeypatch.setattr(joint, "_joint_null_np", spy)
     monkeypatch.setattr(joint, "_CHUNK_ELEMENTS", 2**9, raising=False)
-    np.testing.assert_array_equal(joint.joint_nulls(plan, 500, start=11), expected)
+
+    def unexpected_backend_probe():
+        pytest.fail("the default joint null should use NumPy directly")
+
+    monkeypatch.setattr(backend_module, "_available", unexpected_backend_probe)
+    got = joint.joint_nulls(plan, 500, 11, slice(None))
+    np.testing.assert_array_equal(got, expected)
     assert max(sizes) <= 2**9
-    p = joint.joint_pvalues(np.full(3, 0.3), np.arange(3), sigs, 500, 5)
+    p = joint.joint_pvalues(np.full(3, 0.3), np.arange(3), sigs, 500, 5, False)
     assert max(sizes) <= 2**9 and 0 < p.min() and p.max() <= 1
+    singleton = joint.group_pvalues(
+        [0.3], [np.array([0])], np.array([3]), np.array([100]), 500, 5,
+        None, None, False,
+    )  # fmt: skip
+    np.testing.assert_array_equal(singleton, p[2:])
 
 
-def test_pvalue_hits_match_scalar_draws(monkeypatch):
-    """Joint p-values count exactly the scalar samples at or above each score."""
+def test_joint_batches_are_lazy(monkeypatch):
+    """Start sampling before scheduling later chunks and count every batch."""
+    monkeypatch.setattr(joint, "_CHUNK", 16)
+    sigs = [joint.canonical_signature(*sig) for sig in SIGNATURES[:3]]
+    null_size = 37
+    args = (np.array([0.2, 0.3]), [0, 2], sigs, null_size, 5)
+    expected = joint.joint_pvalues(*args)
+    chunks = joint.chunks
+    scheduled = []
+
+    def record_chunks(size, limit):
+        for start, width in chunks(size, limit):
+            if size == null_size:
+                scheduled.append(start)
+            yield start, width
+
+    def check_progress(work, total, *_):
+        assert not scheduled
+        seen = []
+        for item in work:
+            assert item[0] == scheduled[-1]
+            seen.append(item[0])
+            yield item
+        assert seen == [0, 0, 16, 16, 32, 32]
+        assert total == len(seen)
+
+    monkeypatch.setattr(joint, "chunks", record_chunks)
+    monkeypatch.setattr(joint, "progress", check_progress)
+    np.testing.assert_array_equal(joint.joint_pvalues(*args), expected)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_pvalue_hits_match_scalar_draws(backend, monkeypatch):
+    """Joint p-values count exactly the scalar samples at or above each score.
+
+    Half the scores are atoms of the null, which count as ties.
+    """
     monkeypatch.setattr(joint, "_CHUNK", 64)  # several chunks per signature
     sigs = [joint.canonical_signature(*sig) for sig in SIGNATURES[:4]]
-    scores = np.array([0.1, 0.07, 0.3, 0.5, 0.02, 0.2])
-    sig_ix = np.array([0, 0, 1, 2, 3, 1])
-    p = joint.joint_pvalues(scores, sig_ix, sigs, 400, seed=11)
+    sig_ix = np.array([0, 0, 1, 2, 3, 1, 0, 1, 2, 3, 3, 2])
     null = scalar_nulls(joint.joint_plan(sigs, 11), 400, 0)
-    hits = (null[sig_ix] >= (scores - 1e-10)[:, None]).sum(axis=1)
+    scores = np.array([0.1, 0.07, 0.3, 0.5, 0.02, 0.2] + [0.0] * 6)
+    scores[6:] = null[sig_ix[6:], [3, 50, 101, 222, 307, 399]]  # null atoms
+    p = joint.joint_pvalues(scores, sig_ix, sigs, 400, seed=11, backend=backend)
+    hits = (null[sig_ix] >= common.tie_thresholds(scores)[:, None]).sum(axis=1)
     np.testing.assert_array_equal(p, (hits + 1) / 401)
 
 
