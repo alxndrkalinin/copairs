@@ -107,6 +107,17 @@ def test_ap_from_pairs_accepts_series_similarities():
     np.testing.assert_array_equal(got[1], expected[1])
 
 
+def test_index_pairs_rejects_indices_above_int64():
+    """Validate unsigned indices before converting them for Numba."""
+    limit = np.iinfo(np.int64).max
+    valid = np.array([[0, limit]], dtype=np.uint64)
+    np.testing.assert_array_equal(ranking.index_pairs(valid), valid.astype(np.int64))
+
+    invalid = np.array([[0, limit + 1]], dtype=np.uint64)
+    with pytest.raises(IndexError, match="int64"):
+        ranking.index_pairs(invalid)
+
+
 MALFORMED_AP_INPUTS = """
 import numpy as np
 from copairs import fastap

@@ -15,6 +15,8 @@ import numpy as np
 
 from copairs._numba_cache import launch
 
+_INT64_MAX = np.iinfo(np.int64).max
+
 
 def sortable_keys(keys: np.ndarray) -> np.ndarray:
     """uint64 that orders like float32 ``keys`` in NumPy (NaN last)."""
@@ -54,8 +56,8 @@ def index_pairs(pairs, n: int | None = None) -> np.ndarray:
 
     The kernels index without bounds checks, so this raises instead:
     ValueError unless ``pairs`` is a ``(k, 2)`` integer array (or empty), and
-    IndexError for an index outside ``range(n)``, or a negative one when
-    ``n`` is None. One vectorized pass over the pairs.
+    IndexError for an index outside the nonnegative int64 range or
+    outside ``range(n)`` when ``n`` is given.
     """
     pairs = np.asarray(pairs)
     if pairs.shape in ((0,), (0, 2)):
@@ -65,9 +67,11 @@ def index_pairs(pairs, n: int | None = None) -> np.ndarray:
         raise ValueError(f"pairs must have shape (k, 2), got {pairs.shape}")
     if not np.issubdtype(pairs.dtype, np.integer):
         raise ValueError(f"pairs must hold integer row indices, got {pairs.dtype}")
-    lo, hi = pairs.min(), pairs.max()
+    lo, hi = pairs.min(), int(pairs.max())
     if lo < 0:
         raise IndexError(f"pair index {lo} is out of bounds: indices must be >= 0")
+    if hi > _INT64_MAX:
+        raise IndexError(f"pair index {hi} is out of bounds for int64")
     if n is not None and hi >= n:
         raise IndexError(f"pair index {hi} is out of bounds for {n} profiles")
     pairs = np.ascontiguousarray(pairs)
