@@ -149,6 +149,30 @@ def test_array_label_cells_with_other_columns():
 
 
 @pytest.mark.parametrize(
+    "sameby,diffby,expected",
+    [
+        (["labels", "elapsed"], [], {(0, 1)}),
+        (["labels"], ["elapsed"], {(0, 2), (1, 2)}),
+    ],
+)
+def test_shared_label_pairs_with_submicrosecond_timedeltas(sameby, diffby, expected):
+    """Match DuckDB's microsecond timedelta equality in both pair rules."""
+    frame = pd.DataFrame(
+        {
+            "labels": [["a"], ["a"], ["a"], ["b"]],
+            "elapsed": pd.to_timedelta([100, 200, 1100, 100], unit="ns"),
+        }
+    )
+    args = (frame, sameby, diffby, "labels")
+    sql, keys, counts = sql_pairs(*args)
+    assert as_set(sql) == expected
+    pairs, fast_keys, fast_counts = index_pairs(*args)
+    assert as_set(pairs) == expected
+    np.testing.assert_array_equal(fast_keys, keys)
+    np.testing.assert_array_equal(fast_counts, counts)
+
+
+@pytest.mark.parametrize(
     "labels,index",
     [
         ([["a", None], ["a"], ["b"]], None),  # missing value inside a list

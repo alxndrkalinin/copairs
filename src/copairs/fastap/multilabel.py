@@ -106,15 +106,19 @@ def _monolabel_keys(dframe, sameby, diffby):
 def _column_codes(dframe, columns, multilabel_col):
     """Integer codes of each column's values, or None if SQL must compare them.
 
-    find_pairs compares in DuckDB, where missing values never match and mixed
-    Python types are converted, so such columns keep the SQL comparison.
+    find_pairs compares in DuckDB, where missing values never match, mixed
+    Python types are converted and timedeltas have microsecond precision.
     """
     codes = []
     for c in columns:
         col = dframe[c]
         if c == multilabel_col:  # label lists, already checked, compare whole
             col = col.map(tuple)
-        elif col.isna().any() or pd.api.types.infer_dtype(col).startswith("mixed"):
+        elif (
+            pd.api.types.is_timedelta64_dtype(col.dtype)
+            or col.isna().any()
+            or pd.api.types.infer_dtype(col).startswith("mixed")
+        ):
             return None
         codes.append(pd.factorize(col)[0])
     return codes
