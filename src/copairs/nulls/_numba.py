@@ -10,7 +10,7 @@ import numba
 import numpy as np
 
 from copairs.nulls import philox, sampler
-from copairs._numba_cache import cached_njit
+from copairs._numba_cache import launch, cached_njit
 from copairs.nulls.philox import uniform53, philox4x32
 from copairs.nulls.pvalues import _GROUP_WORK_ROWS
 from copairs.nulls.sampler import gap_loop, _make_ap_sample, _make_gap_guided
@@ -30,9 +30,13 @@ _ap_sample_nb = cached_njit(_SOURCES)(
 )
 
 
-@cached_njit(_SOURCES, parallel=True)
 def ap_nulls(num_pos, total, k0, k1, start, out):
     """Fill ``out[c, t]`` with sample ``start + t`` of configuration ``c``."""
+    launch(_ap_nulls, num_pos, total, k0, k1, start, out)
+
+
+@cached_njit(_SOURCES, parallel=True)
+def _ap_nulls(num_pos, total, k0, k1, start, out):
     n_conf, size = out.shape
     for flat in numba.prange(n_conf * size):
         c = flat // size
@@ -77,8 +81,14 @@ def count_ge(null, thr, ptr, counts):
     for first, end in batches:
         bins = int(ptr[end] - ptr[first]) + end - first
         max_blocks = min(4 * numba.get_num_threads(), max(1, _HIST_BYTES // (8 * bins)))
-        _count_ge_kernel(
-            null, rows[first:end], thr, ptr[first : end + 1], counts, max_blocks
+        launch(
+            _count_ge_kernel,
+            null,
+            rows[first:end],
+            thr,
+            ptr[first : end + 1],
+            counts,
+            max_blocks,
         )
 
 
@@ -153,7 +163,9 @@ def group_ge(null, ptr, conf_ix, conf_cnt, n_group, thr, counts):
     size = null.shape[1]
     max_slots = _GROUP_WORK_ROWS * size
     n_blocks = min(-(-size // _GROUP_BLOCK), max_slots // max(1, len(ptr) - 1))
-    _group_ge(null, ptr, conf_ix, conf_cnt, n_group, thr, counts, max(1, n_blocks))
+    launch(
+        _group_ge, null, ptr, conf_ix, conf_cnt, n_group, thr, counts, max(1, n_blocks)
+    )
 
 
 @cached_njit(_SOURCES, parallel=True)

@@ -636,6 +636,61 @@ def test_import_does_not_load_numba():
     assert out.strip() == "False"
 
 
+def test_parallel_ap_null_kernels_hold_shared_lock(monkeypatch):
+    """Both AP and copied mAP paths guard all parallel kernel launches."""
+    pytest.importorskip("numba")
+    from copairs import _numba_cache
+    from copairs.nulls import _numba
+
+    launched = set()
+
+    def check(name, kernel):
+        def guarded(*args):
+            assert _numba_cache._LAUNCH.locked()
+            launched.add(name)
+            return kernel(*args)
+
+        return guarded
+
+    kernels = ("_ap_nulls", "_count_ge_kernel", "_group_ge")
+    for name in kernels:
+        monkeypatch.setattr(_numba, name, check(name, getattr(_numba, name)))
+
+    nulls.ap_pvalues([0.5], [0], [[1, 7]], 4, 7, backend="numba")
+    nulls.map_pvalues([0.5], [0, 1], [0], [1], [[1, 7]], 4, 7, backend="numba")
+    assert launched == set(kernels)
+
+
+def test_streamed_ap_pvalues_run_concurrently_on_workqueue(monkeypatch):
+    """Two threads can stream Numba AP p-values in the same process."""
+    pytest.importorskip("numba")
+    monkeypatch.setenv("NUMBA_THREADING_LAYER", "workqueue")
+    monkeypatch.setenv("NUMBA_NUM_THREADS", "2")
+    run_python("""
+from threading import Barrier
+from concurrent.futures import ThreadPoolExecutor
+
+import numba
+import numpy as np
+
+from copairs import nulls
+
+args = ([0.5], [0], [[1, 7]], 1 << 20, 7)
+expected = nulls.ap_pvalues(*args, backend="numba")
+assert numba.threading_layer() == "workqueue"
+barrier = Barrier(2, timeout=10)
+
+def score():
+    barrier.wait()
+    return nulls.ap_pvalues(*args, backend="numba")
+
+with ThreadPoolExecutor(max_workers=2) as pool:
+    pending = [pool.submit(score) for _ in range(2)]
+    for future in pending:
+        np.testing.assert_array_equal(future.result(), expected)
+""")
+
+
 @pytest.mark.parametrize("hist_bytes", [16, 64, 800, 2**28])
 def test_numba_count_histograms_within_bound(hist_bytes, monkeypatch):
     """Numba's count_ge keeps each histogram within _HIST_BYTES, counts unchanged.
@@ -755,7 +810,7 @@ assert copairs.__file__.startswith(sys.argv[1]), copairs.__file__
 confs = np.array([[1, 7], [3, 10], [9, 49], [3, 1000]])
 nb = nulls.ap_nulls(confs, 50, 0, backend="numba", dtype=np.float64)
 ref = nulls.ap_nulls(confs, 50, 0, backend="numpy", dtype=np.float64)
-hits = sum(_numba.ap_nulls.stats.cache_hits.values())
+hits = sum(_numba._ap_nulls.stats.cache_hits.values())
 print(json.dumps({"numba": nb.tolist(), "numpy": ref.tolist(), "hits": hits}))
 """
 
