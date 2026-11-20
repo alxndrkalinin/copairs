@@ -14,10 +14,14 @@ import pytest
 
 pytest.importorskip("numba", reason="Numba optional extra is unavailable")
 
+from numba.core.dispatcher import Dispatcher
+
 import copairs
-from copairs import fastap, compute
-from copairs.map import average_precision
+from copairs import fastap, compute, matching, _numba_cache
+from copairs.map import multilabel, average_precision
 from tests.helpers import run_isolated, simulate_random_dframe
+from copairs.fastap import draws, ranking, similarity
+from copairs.fastap import multilabel as fast_multilabel
 from copairs.map.average_precision import build_rank_lists
 
 
@@ -578,3 +582,75 @@ def test_numba_cache_follows_edits_to_compiled_files(tmp_path):
     after = run()
     for key in ("draws", "multilabel"):
         np.testing.assert_array_equal(after[key], 0.5 * np.array(before[key]))
+
+
+def test_ap_stage_kernels_hold_the_shared_launch_lock(monkeypatch):
+    """Every parallel dispatcher runs under the same lock."""
+    lock = getattr(_numba_cache, "_LAUNCH", None)
+    launches = {}
+    dispatchers = set()
+    for module in (similarity, ranking, fast_multilabel, draws):
+        for name, kernel in vars(module).copy().items():
+            if isinstance(kernel, Dispatcher) and kernel.targetoptions.get("parallel"):
+
+                def spy(*args, kernel=kernel, name=name):
+                    launches.setdefault(name, set()).add(
+                        lock is not None and lock.locked()
+                    )
+                    return kernel(*args)
+
+                monkeypatch.setattr(module, name, spy)
+                dispatchers.add(name)
+
+    meta = pd.DataFrame({"group": np.repeat(np.arange(6), 4)})
+    meta["labels"] = [[f"L{g}", f"L{g + 1}"] for g in meta["group"]]
+    feats = np.random.default_rng(9).normal(size=(len(meta), 5))
+    for distance in ("cosine", "euclidean"):
+        average_precision(
+            meta, feats, ["group"], [], [], ["group"],
+            progress_bar=False, backend="numba", distance=distance,
+        )  # fmt: skip
+    multilabel.average_precision(
+        meta, feats, ["labels"], [], [], ["labels"], multilabel_col="labels",
+        progress_bar=False, backend="numba",
+    )  # fmt: skip
+    matching.find_pairs_multilabel(meta, [], ["labels"], "labels", backend="numba")
+    fastap.draw_average_precisions(feats, [[0, 1], [2, 3]], [[4, 5, 6], [7, 8, 9]])
+    assert len(dispatchers) == 8
+    assert launches == {name: {True} for name in dispatchers}
+
+
+def test_pair_similarity_from_two_threads_under_workqueue(monkeypatch):
+    """Concurrent calls to the public pair-similarity API both finish."""
+    monkeypatch.setenv("NUMBA_THREADING_LAYER", "workqueue")
+    monkeypatch.setenv("NUMBA_NUM_THREADS", "2")
+    result = run_isolated("""
+import faulthandler
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
+import numba
+import numpy as np
+from copairs.fastap import PairSimilarity
+
+faulthandler.dump_traceback_later(90, exit=True)
+feats = np.random.default_rng(7).normal(size=(64, 256))
+similarity = PairSimilarity(feats, 'cosine')
+pair = np.array([[0, 1]], dtype=np.uint32)
+expected = similarity(pair)[0]
+assert numba.threading_layer() == 'workqueue'
+pairs = np.tile(pair, (2_000_000, 1))
+barrier = Barrier(2, timeout=10)
+
+def score():
+    barrier.wait()
+    return similarity(pairs)
+
+with ThreadPoolExecutor(max_workers=2) as pool:
+    results = [pool.submit(score) for _ in range(2)]
+    for future in results:
+        actual = future.result()
+        assert actual.shape == (len(pairs),)
+        np.testing.assert_array_equal(actual, expected)
+""")
+    assert result.returncode == 0, result.stderr

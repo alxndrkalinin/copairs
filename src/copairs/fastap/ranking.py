@@ -13,6 +13,8 @@ import operator
 import numba
 import numpy as np
 
+from copairs._numba_cache import launch
+
 
 def sortable_keys(keys: np.ndarray) -> np.ndarray:
     """uint64 that orders like float32 ``keys`` in NumPy (NaN last)."""
@@ -209,7 +211,7 @@ def ap_from_pairs(
         n = 1 + max(int(p.max()) if len(p) else -1 for p in (pos_pairs, neg_pairs))
     pos_sims, neg_sims = pair_sims(pos_sims, pos_pairs), pair_sims(neg_sims, neg_pairs)
     ptr, vals = pair_csr(pos_pairs, pos_sims, n)
-    _sort_segments(ptr, vals)
+    launch(_sort_segments, ptr, vals)
     bins = int(ptr[n]) + n
     # A bin or count of one chunk is at most 2 per negative pair (a self-pair).
     dtype = np.int32 if 2 * len(neg_pairs) <= np.iinfo(np.int32).max else np.int64
@@ -218,10 +220,10 @@ def ap_from_pairs(
     n_chunks = max(1, min(numba.get_num_threads(), n_chunks))
     hist = np.zeros((n_chunks, bins), dtype=dtype)
     n_neg = np.zeros((n_chunks, n), dtype=dtype)
-    _negative_hist(neg_pairs, neg_sims, ptr, vals, hist, n_neg)
+    launch(_negative_hist, neg_pairs, neg_sims, ptr, vals, hist, n_neg)
     # Summed in int64
     hist, n_neg = hist.sum(axis=0, dtype=np.int64), n_neg.sum(axis=0, dtype=np.int64)
-    ap = _ap_from_hist(ptr, hist, n)
+    ap = launch(_ap_from_hist, ptr, hist, n)
     num_pos = np.diff(ptr)
     total = num_pos + n_neg
     paired_ix = np.flatnonzero(total)

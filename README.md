@@ -248,8 +248,8 @@ TBB), a process forked after a Numba parallel kernel ran stops with
 "Terminating: fork() called from a process already using GNU OpenMP" when it
 runs one too. Use the `spawn` or `forkserver` start method (`forkserver` is the
 Linux default from Python 3.14), or set `NUMBA_THREADING_LAYER=workqueue`
-before the first copairs call; that layer is fork-safe but stops the process if
-Numba parallel kernels are called from several threads at once.
+before the first copairs call. Copairs serializes its parallel Numba kernel
+launches so concurrent calls can use the `workqueue` threading layer.
 
 ## Citation
 If you find this work useful for your research, please cite our [paper](https://doi.org/10.1038/s41467-025-60306-2):

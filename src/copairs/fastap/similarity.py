@@ -14,6 +14,7 @@ from typing import Callable
 import numba
 import numpy as np
 
+from copairs._numba_cache import launch
 from copairs.fastap.ranking import index_pairs
 
 # Dot products of unit rows; 1 / (1 + distance), in _minkowski_pairs' order.
@@ -142,8 +143,10 @@ def pair_similarity(
         def minkowski(pairs):
             pairs = index_pairs(pairs, len(x))
             out = np.empty(len(pairs), dtype=np.float32)
-            kernel = _minkowski_pairs if parallel else _minkowski_pairs_serial
-            kernel(x, pairs, kind, out)
+            if parallel:
+                launch(_minkowski_pairs, x, pairs, kind, out)
+            else:
+                _minkowski_pairs_serial(x, pairs, kind, out)
             return out
 
         return minkowski
@@ -153,7 +156,10 @@ def pair_similarity(
     def dot(pairs):
         pairs = index_pairs(pairs, len(x))
         out = np.empty(len(pairs), dtype=np.float32)
-        (_dot_pairs if parallel else _dot_pairs_serial)(x, pairs, out)
+        if parallel:
+            launch(_dot_pairs, x, pairs, out)
+        else:
+            _dot_pairs_serial(x, pairs, out)
         if metric == "abs_cosine":
             np.abs(out, out=out)
         return out
