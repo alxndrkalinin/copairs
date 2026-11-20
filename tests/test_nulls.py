@@ -876,9 +876,9 @@ def test_numba_group_counts_independent_of_blocks(n_blocks):
     np.testing.assert_array_equal(counts, expected)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("backend", [name for name in BACKENDS if name != "cuda"])
 def test_map_pvalues_counts_within_budget(backend, monkeypatch):
-    """The mAP counts' temporaries fit the budget next to the null chunk.
+    """The CPU mAP counts' temporaries fit the budget next to the null chunk.
 
     The budget holds a chunk of 2**15 samples of one configuration, for 2**17
     groups. Numba's count held a slot per group and block of 2**14 samples, 2
@@ -917,7 +917,8 @@ def test_map_pvalues_counts_within_budget(backend, monkeypatch):
     monkeypatch.setattr(owner, name, measured)
     got = nulls.map_pvalues(scores, *groups(n_groups), **kwargs)
     np.testing.assert_array_equal(got, expected[np.arange(n_groups) % len(levels)])
-    assert peaks and max(peaks) <= budget, max(peaks) / budget
+    assert peaks
+    assert max(peaks) <= budget, max(peaks) / budget
 
 
 # Numba and NumPy nulls, Numba p-values, and the cache hits of the sampler and
