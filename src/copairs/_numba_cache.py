@@ -11,6 +11,7 @@ Numba is imported only when a kernel is built, so importing this module does
 not need the optional dependency.
 """
 
+import os
 import types
 import hashlib
 import threading
@@ -18,6 +19,16 @@ from pathlib import Path
 from functools import cache
 
 _LAUNCH = threading.Lock()
+
+
+def _reset_launch_lock() -> None:
+    """Give a forked child its own lock even if the parent's was held."""
+    global _LAUNCH
+    _LAUNCH = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_launch_lock)
 
 
 def launch(kernel, *args):

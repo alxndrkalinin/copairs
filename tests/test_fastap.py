@@ -654,3 +654,39 @@ with ThreadPoolExecutor(max_workers=2) as pool:
         np.testing.assert_array_equal(actual, expected)
 """)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+def test_pair_similarity_from_fork_while_launch_lock_is_held(monkeypatch):
+    """A forked process can launch while the parent holds the lock."""
+    monkeypatch.setenv("NUMBA_THREADING_LAYER", "workqueue")
+    monkeypatch.setenv("NUMBA_NUM_THREADS", "2")
+    result = run_isolated("""
+import multiprocessing as mp
+
+import numba
+import numpy as np
+from copairs import _numba_cache
+from copairs.fastap import PairSimilarity
+
+similarity = PairSimilarity(np.array([[1., 0.], [1., 1.]]), 'cosine')
+pairs = np.array([[0, 1]], dtype=np.uint32)
+expected = similarity(pairs)
+assert numba.threading_layer() == 'workqueue'
+
+def score():
+    np.testing.assert_array_equal(similarity(pairs), expected)
+
+with _numba_cache._LAUNCH:
+    child = mp.get_context('fork').Process(target=score)
+    child.start()
+    try:
+        child.join(timeout=10)
+        assert child.exitcode is not None, 'forked child did not finish its launch'
+        assert child.exitcode == 0, child.exitcode
+    finally:
+        if child.is_alive():
+            child.kill()
+            child.join()
+""")
+    assert result.returncode == 0, result.stderr
