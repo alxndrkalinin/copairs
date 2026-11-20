@@ -553,12 +553,16 @@ def joint_pvalues(
     batch = 1
     if backend == "numba":
         batch = max(1, _BATCH_BYTES // (8 * min(null_size, _CHUNK)))
-    work = [
+    work = (
         (c, size, used[b : b + batch])
         for c, size in chunks(null_size, _CHUNK)
         for b in range(0, len(used), batch)
-    ]
-    for c, size, sigs in progress(work, len(work), progress_bar, "joint mAP null"):
+    )
+    n_chunks = -(-null_size // _CHUNK)
+    n_batches = -(-len(used) // batch)
+    for c, size, sigs in progress(
+        work, n_chunks * n_batches, progress_bar, "joint mAP null"
+    ):
         null = _joint_nulls(plan, size, c, sigs, backend)
         null.sort(axis=1)
         for r, s in enumerate(sigs):

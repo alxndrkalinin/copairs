@@ -210,6 +210,37 @@ def test_chunks_bound_the_per_sample_arrays(monkeypatch):
     np.testing.assert_array_equal(singleton, p[2:])
 
 
+def test_joint_batches_are_lazy(monkeypatch):
+    """Start sampling before scheduling later chunks and count every batch."""
+    monkeypatch.setattr(joint, "_CHUNK", 16)
+    sigs = [joint.canonical_signature(*sig) for sig in SIGNATURES[:3]]
+    null_size = 37
+    args = (np.array([0.2, 0.3]), [0, 2], sigs, null_size, 5)
+    expected = joint.joint_pvalues(*args)
+    chunks = joint.chunks
+    scheduled = []
+
+    def record_chunks(size, limit):
+        for start, width in chunks(size, limit):
+            if size == null_size:
+                scheduled.append(start)
+            yield start, width
+
+    def check_progress(work, total, *_):
+        assert not scheduled
+        seen = []
+        for item in work:
+            assert item[0] == scheduled[-1]
+            seen.append(item[0])
+            yield item
+        assert seen == [0, 0, 16, 16, 32, 32]
+        assert total == len(seen)
+
+    monkeypatch.setattr(joint, "chunks", record_chunks)
+    monkeypatch.setattr(joint, "progress", check_progress)
+    np.testing.assert_array_equal(joint.joint_pvalues(*args), expected)
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_pvalue_hits_match_scalar_draws(backend, monkeypatch):
     """Joint p-values count exactly the scalar samples at or above each score.
