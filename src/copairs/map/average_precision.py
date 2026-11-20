@@ -397,6 +397,7 @@ def average_precision(
     # Compute similarities for negative pairs
     logger.info("Computing negative similarities...")
     neg_sims = similarity_fn(feats, neg_pairs, batch_size)
+    del similarity_fn  # Release the kernel's feature copy before AP scoring.
 
     if fastap is not None:
         # Count each positive's preceding negatives instead of sorting

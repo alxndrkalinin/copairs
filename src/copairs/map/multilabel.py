@@ -174,6 +174,7 @@ def average_precision(
 
     logger.info("Computing negative similarities...")
     neg_sims = distance_fn(feats, neg_pairs, batch_size)
+    del distance_fn  # Release the kernel's feature copy before AP scoring.
 
     if fastap is not None:
         logger.info("Computing AP per label...")
