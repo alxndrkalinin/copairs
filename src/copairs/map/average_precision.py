@@ -1,5 +1,6 @@
 """Functions to compute average precision."""
 
+import os
 import logging
 import threading
 from typing import List, Literal
@@ -68,6 +69,16 @@ def attached_pairs(frame: pd.DataFrame):
 # Held while a null's thread builds a similarity kernel, so that the null's
 # other threads wait for it instead of building their own copies.
 _BUILD = threading.Lock()
+
+
+def _reset_build_lock() -> None:
+    """Give a forked child its own kernel-build lock."""
+    global _BUILD
+    _BUILD = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_build_lock)
 
 
 class _FeatureSimilarity:

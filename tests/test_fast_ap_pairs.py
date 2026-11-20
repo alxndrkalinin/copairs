@@ -1,5 +1,7 @@
 """The pairs the Numba AP stage attaches for the permutation null."""
 
+import os
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -8,6 +10,7 @@ pytest.importorskip("numba", reason="Numba optional extra is unavailable")
 
 from copairs import fastap, compute
 from copairs.map import multilabel, average_precision, mean_average_precision
+from tests.helpers import run_isolated
 from copairs.fastap import similarity
 from copairs.map.average_precision import attached_pairs, _FeatureSimilarity
 
@@ -252,3 +255,43 @@ def test_null_releases_the_kernel_it_built(monkeypatch):
             mean_average_precision(ap, [sameby], **NULL)
             assert similarity._kernel is None
     assert builds == ["cosine"] * 4
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+def test_forked_child_can_build_attached_similarity(monkeypatch):
+    """The child can build its kernel while the parent holds the build lock."""
+    monkeypatch.setenv("NUMBA_THREADING_LAYER", "workqueue")
+    monkeypatch.setenv("NUMBA_NUM_THREADS", "2")
+    result = run_isolated("""
+import multiprocessing as mp
+
+import numpy as np
+import pandas as pd
+from copairs.map import average_precision
+from copairs.map.average_precision import _BUILD
+
+meta = pd.DataFrame({'group': ['a', 'a', 'b', 'b']})
+feats = np.array([[0., 0.], [0., 1.], [0., 1.], [0., 0.]])
+_, pairs = average_precision(
+    meta, feats, ['group'], [], [], ['group'], distance='euclidean',
+    backend='numba', return_pairs=True, progress_bar=False,
+)
+similarity = pairs['similarity']
+assert similarity._kernel is None
+
+def score():
+    np.testing.assert_array_equal(similarity(np.array([[0, 1]])), [0.5])
+
+with _BUILD:
+    child = mp.get_context('fork').Process(target=score)
+    child.start()
+    try:
+        child.join(timeout=10)
+        assert child.exitcode is not None, 'forked child did not build similarity'
+        assert child.exitcode == 0, child.exitcode
+    finally:
+        if child.is_alive():
+            child.kill()
+            child.join()
+""")
+    assert result.returncode == 0, result.stderr
