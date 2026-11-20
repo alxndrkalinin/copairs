@@ -103,6 +103,20 @@ def test_normalize_ap_vectorized():
     assert np.isscalar(single_norm)
 
 
+@pytest.mark.parametrize("backend", ["numpy", "numba"])
+def test_normalize_ap_column_counts(backend):
+    """Each count array may hold a scalar per row in a column vector."""
+    if backend == "numba":
+        pytest.importorskip("numba", reason="Numba optional extra is unavailable")
+    ap = np.array([[0.5, 0.7], [0.6, 0.8]])
+    M = np.array([1, 2])
+    N = np.array([4])
+    expected = normalize_ap(ap, M, N, backend="numpy")
+    np.testing.assert_array_equal(
+        normalize_ap(ap, M[:, None], N[:, None], backend=backend), expected
+    )
+
+
 def test_normalize_ap_edge_cases():
     """Test edge cases in normalization."""
     from copairs.map.normalization import normalize_ap

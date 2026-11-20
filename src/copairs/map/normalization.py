@@ -128,9 +128,11 @@ def normalize_ap(
             f"Array lengths must match: ap={len(ap)}, M={len(M)}, N={len(N)}"
         )
 
+    # Each count row holds one value, including in a column vector.
+    M = np.broadcast_to(M.reshape(len(M)), len(ap))
+    N = np.broadcast_to(N.reshape(len(N)), len(ap))
+
     # Compute expected AP for each configuration, one per row of ap
-    M = np.broadcast_to(M, len(ap))
-    N = np.broadcast_to(N, len(ap))
     if fastap is not None:
         mu0 = fastap.expected_ap_array(M, N).reshape((-1,) + (1,) * (ap.ndim - 1))
     else:
