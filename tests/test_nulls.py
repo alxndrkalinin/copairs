@@ -1,5 +1,6 @@
 """Tests for the counter-based random stream, the AP null sampler and p-values."""
 
+import os
 import sys
 import itertools
 import subprocess
