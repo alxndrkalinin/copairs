@@ -1,5 +1,6 @@
 """Functions to compute average precision."""
 
+import os
 import logging
 import threading
 from typing import List, Literal
@@ -71,6 +72,16 @@ def attached_pairs(frame: pd.DataFrame):
 _BUILD = threading.Lock()
 
 
+def _reset_build_lock() -> None:
+    """Give a forked child its own kernel-build lock."""
+    global _BUILD
+    _BUILD = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_build_lock)
+
+
 class _FeatureSimilarity:
     """``pairs -> similarities`` of an AP call's features, as its AP stage computed them.
 
@@ -83,26 +94,30 @@ class _FeatureSimilarity:
     kernel's serial form on the calling thread (the same bits; many small
     parallel launches from several threads cost more than they gain, and
     Numba's workqueue threading layer stops the process on concurrent
-    launches), and under ``"cuda"`` its launches run one at a time, as
-    parallel kernels' do (:func:`copairs._numba_cache.launch`). Otherwise
+    launches). Under ``"cuda"``, the launches run on the AP stage's device,
+    one at a time (:func:`copairs._numba_cache.launch`). Otherwise
     batches of ``batch_size`` pairs go through the same pairwise function as
     in :func:`copairs.compute.get_similarity_fn`, one after another in the
     calling thread.
     """
 
-    def __init__(self, feats, distance, batch_size, kernel_backend=None):
+    def __init__(self, feats, distance, batch_size, kernel_backend, device_id):
         self.feats = feats
         self.distance = distance
         self.batch_size = batch_size
         self.kernel_backend = kernel_backend
+        self._device_id = device_id
         self._fn = compute.pairwise_similarity_fn(distance)
         self._kernel = None
 
     def __call__(self, pairs):
         if self.kernel_backend == "numba":
-            return self._kernel_sims(pairs)
+            return self._kernel_sims(backend_module("numba"), pairs)
         if self.kernel_backend == "cuda":
-            return launch(self._kernel_sims, pairs)
+            # Check for a fork before touching the CUDA runtime.
+            kernels = backend_module("cuda")
+            with kernels.cp.cuda.Device(self._device_id):
+                return launch(self._kernel_sims, kernels, pairs)
         pairs = np.asarray(pairs)
         out = np.empty(len(pairs), dtype=np.float32)
         for lo in range(0, len(pairs), self.batch_size):
@@ -112,11 +127,8 @@ class _FeatureSimilarity:
             )
         return out
 
-    def _kernel_sims(self, pairs):
+    def _kernel_sims(self, kernels, pairs):
         """Return the kernel's similarities of ``pairs``, built by the first call."""
-        # Looked up on every call: under "cuda" this checks the GPU (and that
-        # this process was not forked from one that used it) before a launch.
-        kernels = backend_module(self.kernel_backend)
         kernel = self._kernel  # one read: release() may clear it meanwhile
         if kernel is None:
             with _BUILD:  # one build (one copy of the features) at a time
@@ -152,7 +164,10 @@ def similarity_fns(fastap, backend, feats, distance, batch_size, progress_bar):
     generic = compute.get_similarity_fn(distance, progress_bar=progress_bar)
     fn = generic if fastap is None else fastap.similarity_fn(feats, distance, generic)
     kernel_backend = None if fn is generic else backend
-    return fn, _FeatureSimilarity(feats, distance, batch_size, kernel_backend)
+    device_id = fastap.cp.cuda.Device().id if kernel_backend == "cuda" else None
+    return fn, _FeatureSimilarity(
+        feats, distance, batch_size, kernel_backend, device_id
+    )
 
 
 def check_recomputable(similarity) -> None:
@@ -330,15 +345,17 @@ def average_precision(
         The default ``"numpy"`` has no optional dependencies and gives the
         APs of earlier copairs releases. ``"numba"`` (install
         ``copairs[numba]``) computes similarities with parallel kernels for
-        cosine, abs_cosine, correlation, euclidean, manhattan and chebyshev
-        (other distances use the NumPy functions), AP by counting the negatives
-        between sorted positives instead of sorting rank lists, and normalized
-        AP from a harmonic-number table. Given the same similarities, its APs
-        match ``"numpy"`` to float64 rounding. The kernels' similarities match
+        cosine, abs_cosine, correlation, euclidean, manhattan and chebyshev.
+        Other distances use NumPy functions, as do euclidean, manhattan and
+        chebyshev on integer features outside float64's exact-integer range.
+        The backend computes AP by counting the negatives between sorted
+        positives and normalized AP from a harmonic-number table.
+        Given the same similarities, its APs match ``"numpy"`` to float64
+        rounding. The kernels' similarities match
         to float32 rounding, so near-ties can rank differently, and they are
         computed in float64, so float32 rows whose norms overflow float32 get
         their actual similarity. The kernels take all pairs at once:
-        ``batch_size`` and ``progress_bar`` apply only to the other distances.
+        ``batch_size`` and ``progress_bar`` apply only to NumPy similarities.
         ``"cuda"`` (install ``copairs[gpu]``; needs a CUDA GPU, else
         RuntimeError) computes the kernels' similarities and AP on the GPU,
         streaming the negative pairs within 1 GiB of GPU memory, and
@@ -347,8 +364,8 @@ def average_precision(
         match to float32 rounding. The pairs attached to the frame recompute
         similarities with the same kernels, so the permutation null ranks
         pairs as the APs did; each permutation null builds the kernel's own
-        copy of ``feats`` (on the GPU for ``"cuda"``) and drops it when it
-        returns.
+        copy of ``feats`` (on the AP stage's device for ``"cuda"``) and drops
+        it when it returns.
 
     Returns
     -------
@@ -414,6 +431,7 @@ def average_precision(
     # Compute similarities for negative pairs
     logger.info("Computing negative similarities...")
     neg_sims = similarity_fn(feats, neg_pairs, batch_size)
+    del similarity_fn  # Release the function before AP scoring.
 
     if fastap is not None:
         # Count each positive's preceding negatives instead of sorting
@@ -463,8 +481,10 @@ def average_precision(
 def p_values(
     dframe: pd.DataFrame,
     null_size: int,
-    seed: int,
+    seed: int | None,
     progress_bar: bool = True,
+    *,
+    sampler: str = "legacy",
     backend: str = "auto",
 ) -> np.ndarray:
     """Compute p-values for average precision scores based on a null distribution.
@@ -484,13 +504,15 @@ def p_values(
     null_size : int
         The number of samples to generate in the null distribution for significance testing.
     seed : int or None
-        Random seed of the null distribution, an integer in ``[0, 2**64)``,
-        see :func:`copairs.compute.p_values`.
+        Random seed of the null distribution. See :func:`copairs.compute.p_values`.
     progress_bar : bool
         Whether or not to show tqdm's progress bar.
+    sampler : str
+        Use the v0.6.0 sampler and cache with ``"legacy"`` (default), or use
+        ``"streamed"`` for chunked Philox sampling without a disk cache.
     backend : str
-        Backend of the null sampler: ``"auto"`` (default), ``"cuda"``,
-        ``"numba"`` or ``"numpy"``, see :func:`copairs.compute.get_null_dists`.
+        Backend for ``sampler="streamed"``: ``"auto"`` (default), ``"cuda"``,
+        ``"numba"`` or ``"numpy"``, see :func:`copairs.compute.p_values`.
 
     Returns
     -------
@@ -510,7 +532,13 @@ def p_values(
 
     # Compute p-values for profiles with valid configurations using the null distribution
     pvals[mask] = compute.p_values(
-        scores, null_confs, null_size, seed, progress_bar, backend
+        scores,
+        null_confs,
+        null_size,
+        seed,
+        progress_bar,
+        sampler=sampler,
+        backend=backend,
     )
 
     # Return the array of p-values, including NaN for invalid profiles

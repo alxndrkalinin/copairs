@@ -55,14 +55,17 @@ CALLS = [
     "nulls.ap_pvalues([0.5], [0], [[2, 5]], 4, 0, backend='cuda')",
     "nulls.map_pvalues([0.5], [0, 1], [0], [1], [[2, 5]], 4, 0, backend='cuda')",
     "compute.get_null_dists(np.array([[2, 10]]), 10, 0, progress_bar=False,"
-    " backend='cuda')",
+    " sampler='streamed', backend='cuda')",
+    "compute.get_null_dists(np.array([[0, 10]]), 10, 0,"
+    " sampler='streamed', backend='cuda')",
     "compute.p_values(np.array([0.5]), [[2, 10]], 10, 0, progress_bar=False,"
-    " backend='cuda')",
-    "compute.p_values(np.array([]), np.empty((0, 2)), 10, 0, backend='cuda')",
+    " sampler='streamed', backend='cuda')",
+    "compute.p_values(np.array([]), np.empty((0, 2)), 10, 0,"
+    " sampler='streamed', backend='cuda')",
     "mean_average_precision(FRAME, ['g'], 10, 0.05, 0, progress_bar=False,"
-    " null='copied', backend='cuda')",
+    " null='copied', sampler='streamed', backend='cuda')",
     "mean_average_precision(FRAME.iloc[:0], ['g'], 10, 0.05, 0, null='copied',"
-    " backend='cuda')",
+    " sampler='streamed', backend='cuda')",
 ]
 META = pd.DataFrame({"l": list("aabb"), "p": list("xyxy")})
 LABELS = META.assign(l=[["a"], ["a", "b"], ["b"], ["b"]])
@@ -524,12 +527,16 @@ def test_auto_never_runs_cuda(host_cuda):
             "n_total_pairs": 10,
         }
     )
-    compute.get_null_dists(confs, 50, 1, progress_bar=False)
-    compute.p_values(scores[:5], confs[conf_ix[:5]], 200, 1, progress_bar=False)
-    mean_average_precision(
-        frame, ["g"], 200, 0.05, 1, progress_bar=False, null="copied"
-    )
-    assert not host_cuda.calls
+    public = dict(progress_bar=False, sampler="streamed")
+    for backend_name, use_gpu in (("auto", False), ("cuda", True)):
+        for fn, args, options in (
+            (compute.get_null_dists, (confs, 50, 1), {}),
+            (compute.p_values, (scores[:5], confs[conf_ix[:5]], 200, 1), {}),
+            (mean_average_precision, (frame, ["g"], 200, 0.05, 1), {"null": "copied"}),
+        ):
+            host_cuda.calls = 0
+            fn(*args, **options, backend=backend_name, **public)
+            assert bool(host_cuda.calls) == use_gpu, (fn.__name__, backend_name)
 
 
 @pytest.mark.skipif(not HAS_NUMBA, reason="Numba optional extra is unavailable")
@@ -586,9 +593,13 @@ def test_cuda_nulls_sampled_within_budget(monkeypatch, budget):
         assert max(sizes) <= max(budget, np.dtype(dtype).itemsize), sizes
         assert sum(sizes) == expected.nbytes
         assert (len(launches) > 1) == (budget < expected.nbytes)
-    expected = compute.get_null_dists(confs, 40, 3, progress_bar=False, backend="numpy")
-    got = compute.get_null_dists(confs, 40, 3, progress_bar=False, backend="cuda")
+    public = dict(progress_bar=False, sampler="streamed")
+    expected = compute.get_null_dists(confs, 40, 3, backend="numpy", **public)
+    launches.clear()
+    got = compute.get_null_dists(confs, 40, 3, backend="cuda", **public)
     np.testing.assert_array_equal(got, expected)
+    assert launches
+    assert np.isnan(got[-1]).all()
 
 
 @needs_cupy
@@ -839,6 +850,9 @@ def _child_backend():
 
 
 @needs_gpu
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(), reason="requires fork"
+)
 def test_forked_child_finds_no_gpu():
     """A process forked after CUDA was initialised does not list the GPU."""
     expected = nulls.ap_nulls(CONFS, 50, seed=4, backend="cuda")  # initialises CUDA

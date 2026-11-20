@@ -14,24 +14,32 @@ Numba is imported only when a kernel is built, so importing this module does
 not need the optional dependency.
 """
 
+import os
 import types
 import hashlib
 import threading
 from pathlib import Path
 from functools import cache
 
-# Held while a parallel kernel runs (see launch).
 _LAUNCH = threading.Lock()
 
 
-def launch(kernel, *args):
-    """Run the parallel ``kernel`` on Numba's threads, one launch at a time.
+def _reset_launch_lock() -> None:
+    """Give a forked child its own lock even if the parent's was held."""
+    global _LAUNCH
+    _LAUNCH = threading.Lock()
 
-    Callers may launch from several threads: users' threads, and the
-    permutation null's pool of groups next to them. Numba's workqueue
-    threading layer, its fallback without TBB or OpenMP, aborts the process
-    on concurrent launches, and the OpenMP layer would start a team of
-    threads per launching thread. Returns what ``kernel`` returns.
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_launch_lock)
+
+
+def launch(kernel, *args):
+    """Run one parallel Numba kernel at a time within copairs.
+
+    Use this for parallel dispatchers because Numba's workqueue threading
+    layer aborts on concurrent launches from Python threads. Serial kernels
+    can run directly on their calling threads.
     """
     with _LAUNCH:
         return kernel(*args)

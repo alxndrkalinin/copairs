@@ -18,6 +18,7 @@ from scipy import stats
 
 from copairs import nulls, compute
 from copairs.map import multilabel, average_precision, mean_average_precision
+from copairs.nulls import backend as backend_module
 from copairs.nulls import permutation, tie_thresholds
 from tests.helpers import ML_SPEC, label_meta, shared_labels, random_targets
 from copairs._backend import cpu_backends
@@ -125,7 +126,7 @@ def group_of_q(meta, feats, spec):
     return ap["average_precision"].mean(), layout, pairs
 
 
-def draws_of(meta, feats, spec, null_size, seed=0, backend="auto"):
+def draws_of(meta, feats, spec, null_size, seed=0, backend="numpy"):
     """Observed mAP and the null's draws for group "q"."""
     observed, layout, pairs = group_of_q(meta, feats, spec)
     out = np.empty(null_size)
@@ -275,18 +276,25 @@ def scalar_identity_map(layout, pm):
     return permutation._group_map(pm, *layout.map_args(), *map_scratch(layout.n))
 
 
-def test_hits_match_scalar_draws():
+def test_hits_match_scalar_draws(monkeypatch):
     """The count of draws reaching the observed mAP is the scalar draws' count."""
     meta = layout_meta(2, 3, 6)
     feats = np.random.default_rng(21).standard_normal((len(meta), 5))
     spec = dict(SPEC, neg_sameby=["plate"])
     observed, group, pairs = group_of_q(meta, feats, spec)
+
+    def unexpected_backend_probe():
+        pytest.fail("the default permutation null should use NumPy directly")
+
+    monkeypatch.setattr(backend_module, "cpu_backends", unexpected_backend_probe)
+    out = np.empty(700)
     count, identity, pool = permutation.permutation_null(
-        *group, pairs["similarity"], 700, 5
+        *group, pairs["similarity"], 700, 5, None, out
     )
     members, edges, _, block_of = group
     layout = permutation._Layout(members, edges, block_of, pairs["similarity"], pool)
     _, maps = scalar_draws(layout, 0, 700, *permutation.group_key(5, members))
+    np.testing.assert_array_equal(out, maps)
     assert count == (maps >= tie_thresholds(identity)).sum()
     assert 0 < count < 700
 
@@ -551,7 +559,7 @@ def test_interleaved_pools_are_built_once(monkeypatch):
 
     monkeypatch.setattr(permutation, "_Pool", CountedPool)
     args = (groups, np.arange(6), np.ones(6), np.full(6, 4), pos, neg, similarity)
-    p = permutation.permutation_pvalues(*args, 200, 0)
+    p = permutation.permutation_pvalues(*args, 200, 0, None, False, 2)
     assert sorted(built) == [[[10, 11, 12]], [[10, 11, 13]]]
     monkeypatch.setattr(permutation, "_Pool", CountedPool.__base__)
     alone = [
@@ -1389,19 +1397,34 @@ def test_draw_tasks_in_flight_are_bounded(backend, monkeypatch, numba_threads):
 
 
 @pytest.mark.parametrize(
-    "func",
+    "func, positional, keyword_only",
     [
-        permutation.permutation_null,
-        permutation.permutation_pvalues,
-        permutation.label_permutation_pvalues,
+        (permutation.permutation_null, ["pool", "out"], ["backend", "parallel"]),
+        *[
+            (
+                function,
+                [
+                    "observed",
+                    "progress_bar",
+                    "max_workers",
+                    "max_reference_profiles",
+                    "pool_memory_budget",
+                    "key_table_memory_budget",
+                ],
+                ["backend"],
+            )
+            for function in (
+                permutation.permutation_pvalues,
+                permutation.label_permutation_pvalues,
+            )
+        ],
     ],
 )
-def test_options_are_keyword_only(func):
-    """The permutation nulls take every option after the seed by keyword.
-
-    A merge had reordered permutation_pvalues' trailing options, which then
-    bound positional arguments to other parameters without an error.
-    """
+def test_permutation_preserves_positional_options(func, positional, keyword_only):
+    """Preserve released positional arguments and require keywords for additions."""
     params = list(inspect.signature(func).parameters.values())
     after = params[[p.name for p in params].index("seed") + 1 :]
-    assert after and all(p.kind is p.KEYWORD_ONLY for p in after)
+    assert [p.name for p in after if p.kind is p.POSITIONAL_OR_KEYWORD] == positional
+    assert [p.name for p in after if p.kind is p.KEYWORD_ONLY] == keyword_only
+    assert len(after) == len(positional) + len(keyword_only)
+    assert inspect.signature(func).parameters["backend"].default == "numpy"

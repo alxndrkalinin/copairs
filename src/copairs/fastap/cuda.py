@@ -277,7 +277,7 @@ def ap_from_pairs(
         keys = rank_keys(_chunk_sims(neg_sims, start, pairs), cp)
         args = (pairs, keys, np.int64(len(pairs)), ptr, vals, hist)
         _kernel("negative_hist")(_cuda.grid(2 * len(pairs)), (_cuda.BLOCK,), args)
-        del pairs, keys  # free this chunk before the next one
+        del args, pairs, keys  # free this chunk before the next one
     ap, n_neg = cp.empty(n, dtype=cp.float64), cp.empty(n, dtype=cp.uint64)
     _kernel("ap_from_hist")(
         _cuda.grid(n), (_cuda.BLOCK,), (ptr, hist, np.int64(n), ap, n_neg)
@@ -363,15 +363,16 @@ def draw_aps(x: np.ndarray, idx: np.ndarray, k: int, budget_bytes: int) -> np.nd
     scores draws of more than ``_MAX_DRAW_QUERIES`` queries on Numba. Each
     chunk of draws' similarities comes from one batched matrix product on
     the GPU, and its APs are copied to the host before the next. The rows
-    stay on the GPU when they take at most half of ``budget_bytes``, and the
-    chunks get the rest; otherwise each chunk's rows are gathered on the
-    host and copied.
+    stay on the GPU if they take at most half the budget and leave enough
+    space for a draw. Otherwise each chunk's rows are gathered on the host
+    and copied.
     """
     if k > _MAX_DRAW_QUERIES:
         return draws.draw_aps(x, idx, k, budget_bytes)
     n_draws, width = idx.shape
     m = width - k
-    resident = 2 * x.nbytes <= budget_bytes
+    per_draw = draws._bytes_per_draw(k, m, x.shape[1])
+    resident = x.nbytes <= min(budget_bytes // 2, budget_bytes - per_draw)
     rows_of = cp.asarray(x) if resident else x
     budget_bytes -= x.nbytes if resident else 0
     out = np.empty((n_draws, k), dtype=np.float64)
@@ -389,5 +390,5 @@ def draw_aps(x: np.ndarray, idx: np.ndarray, k: int, budget_bytes: int) -> np.nd
         blocks = _cuda.grid(n_rows * threads, block=threads)  # a block per row
         kernel(blocks, (threads,), args, shared_mem=8 * k)
         ap.get(out=out[start : start + len(chunk)])
-        del sims, ap  # free this chunk before gathering the next one
+        del args, sims, ap  # free this chunk before gathering the next one
     return out

@@ -4,6 +4,7 @@ Tests parametrized over ``AP_BACKENDS`` run the Numba kernels, and the CUDA
 ones (:mod:`copairs.fastap.cuda`) where CuPy compiles kernels for a GPU.
 """
 
+import os
 import tracemalloc
 
 import numpy as np
@@ -118,6 +119,17 @@ def test_ap_from_pairs_accepts_series_similarities(backend):
     expected = kernels.ap_from_pairs(pos, neg, pos_sims, neg_sims)
     got = kernels.ap_from_pairs(pos, neg, pd.Series(pos_sims), pd.Series(neg_sims))
     np.testing.assert_array_equal(got[1], expected[1])
+
+
+def test_index_pairs_rejects_indices_above_int64():
+    """Validate unsigned indices before converting them for Numba."""
+    limit = np.iinfo(np.int64).max
+    valid = np.array([[0, limit]], dtype=np.uint64)
+    np.testing.assert_array_equal(ranking.index_pairs(valid), valid.astype(np.int64))
+
+    invalid = np.array([[0, limit + 1]], dtype=np.uint64)
+    with pytest.raises(IndexError, match="int64"):
+        ranking.index_pairs(invalid)
 
 
 MALFORMED_AP_INPUTS = """
@@ -460,6 +472,65 @@ def test_draw_average_precisions_index_range(bad):
         fastap.draw_average_precisions(feats, [[0, bad]], [[2, 3]])
     with pytest.raises(ValueError, match="rows of feats"):
         fastap.draw_average_precisions(feats, [[0, 1]], [[2, bad]])
+
+
+@pytest.mark.parametrize("bad", [-0.5, 1.5])
+def test_draw_average_precisions_requires_integer_indices(bad):
+    """The draw path rejects fractional indices instead of rounding them."""
+    feats = np.eye(4, dtype=np.float32)
+    with pytest.raises(ValueError, match="integer row indices"):
+        fastap.draw_average_precisions(feats, [[0, bad]], [[2, 3]])
+    with pytest.raises(ValueError, match="integer row indices"):
+        fastap.draw_average_precisions(feats, [[0, 1]], [[2, bad]])
+
+
+def test_draw_average_precisions_accepts_empty_reference_lists():
+    """Empty reference lists need no dtype, and unsigned queries stay valid."""
+    feats = np.eye(2, dtype=np.float32)
+    queries = np.array([[0, 1], [1, 0]], dtype=np.uint64)
+    got = fastap.draw_average_precisions(feats, queries, [[], []])
+    np.testing.assert_array_equal(got, [[1.0, 1.0], [1.0, 1.0]])
+
+
+@pytest.mark.parametrize("backend", AP_BACKENDS)
+def test_draw_average_precisions_budget_for_one_draw(backend):
+    """One draw fits exactly, with no room for extra resident features on CUDA."""
+    feats = np.ones((2, 1), dtype=np.float32)
+    args = (feats, [[0, 1]], [[0, 1]])
+    budget = 4 * (2 + 2) * (feats.shape[1] + 2)
+    with pytest.raises(ValueError, match="one draw"):
+        fastap.draw_average_precisions(*args, budget_bytes=budget - 1, backend=backend)
+    got = fastap.draw_average_precisions(
+        *args, budget_bytes=np.int64(budget), backend=backend
+    )
+    np.testing.assert_array_equal(got, [[1.0, 1.0]])
+
+
+@pytest.mark.parametrize("budget", [0, -1])
+def test_draw_average_precisions_requires_positive_budget(budget):
+    """A nonpositive byte budget is invalid."""
+    with pytest.raises(ValueError, match="budget_bytes must be positive"):
+        fastap.draw_average_precisions(
+            np.eye(4), [[0, 1]], [[2, 3]], budget_bytes=budget
+        )
+
+
+def test_draw_average_precisions_requires_integer_budget():
+    """A fractional byte budget is invalid."""
+    with pytest.raises(TypeError):
+        fastap.draw_average_precisions(
+            np.eye(4), [[0, 1]], [[2, 3]], budget_bytes=100.5
+        )
+
+
+def test_draw_average_precisions_without_draws():
+    """An empty batch needs no space for gathered inputs or similarities."""
+    indices = np.empty((0, 2), dtype=np.int64)
+    got = fastap.draw_average_precisions(
+        np.zeros((4, 4)), indices, indices, budget_bytes=1
+    )
+    assert got.shape == (0, 2)
+    assert got.dtype == np.float64
 
 
 @pytest.mark.parametrize("backend", AP_BACKENDS)
@@ -850,3 +921,75 @@ def test_ap_stage_kernels_launch_under_the_launch_lock(monkeypatch):
         feats, [[0, 1], [2, 3]], [[4, 5, 6], [7, 8, 9]], backend="numba"
     )
     assert len(patched) == 8 and held == {name: {True} for name in patched}
+
+
+def test_pair_similarity_from_two_threads_under_workqueue(monkeypatch):
+    """Concurrent calls to the public pair-similarity API both finish."""
+    monkeypatch.setenv("NUMBA_THREADING_LAYER", "workqueue")
+    monkeypatch.setenv("NUMBA_NUM_THREADS", "2")
+    result = run_isolated("""
+import faulthandler
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
+import numba
+import numpy as np
+from copairs.fastap import PairSimilarity
+
+faulthandler.dump_traceback_later(90, exit=True)
+feats = np.random.default_rng(7).normal(size=(64, 256))
+similarity = PairSimilarity(feats, 'cosine')
+pair = np.array([[0, 1]], dtype=np.uint32)
+expected = similarity(pair)[0]
+assert numba.threading_layer() == 'workqueue'
+pairs = np.tile(pair, (2_000_000, 1))
+barrier = Barrier(2, timeout=10)
+
+def score():
+    barrier.wait()
+    return similarity(pairs)
+
+with ThreadPoolExecutor(max_workers=2) as pool:
+    results = [pool.submit(score) for _ in range(2)]
+    for future in results:
+        actual = future.result()
+        assert actual.shape == (len(pairs),)
+        np.testing.assert_array_equal(actual, expected)
+""")
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+def test_pair_similarity_from_fork_while_launch_lock_is_held(monkeypatch):
+    """A forked process can launch while the parent holds the lock."""
+    monkeypatch.setenv("NUMBA_THREADING_LAYER", "workqueue")
+    monkeypatch.setenv("NUMBA_NUM_THREADS", "2")
+    result = run_isolated("""
+import multiprocessing as mp
+
+import numba
+import numpy as np
+from copairs import _numba_cache
+from copairs.fastap import PairSimilarity
+
+similarity = PairSimilarity(np.array([[1., 0.], [1., 1.]]), 'cosine')
+pairs = np.array([[0, 1]], dtype=np.uint32)
+expected = similarity(pairs)
+assert numba.threading_layer() == 'workqueue'
+
+def score():
+    np.testing.assert_array_equal(similarity(pairs), expected)
+
+with _numba_cache._LAUNCH:
+    child = mp.get_context('fork').Process(target=score)
+    child.start()
+    try:
+        child.join(timeout=10)
+        assert child.exitcode is not None, 'forked child did not finish its launch'
+        assert child.exitcode == 0, child.exitcode
+    finally:
+        if child.is_alive():
+            child.kill()
+            child.join()
+""")
+    assert result.returncode == 0, result.stderr

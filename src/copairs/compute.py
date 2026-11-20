@@ -1,8 +1,10 @@
 """Functions to compute distances and ranks using numpy operations."""
 
 import os
+import tempfile
 import itertools
-from typing import Tuple, Union, Callable, Optional
+from typing import Tuple, Union, Callable
+from pathlib import Path
 from multiprocessing.pool import ThreadPool
 
 import numpy as np
@@ -11,7 +13,7 @@ from scipy.spatial.distance import cdist
 
 from copairs import nulls
 from copairs.nulls.common import resolve_seed, check_null_size
-from copairs.nulls.backend import check_backend
+from copairs.nulls.backend import check_sampler, resolve_backend
 
 
 def parallel_map(
@@ -371,6 +373,33 @@ def pairwise_similarity_fn(distance: Union[str, Callable]) -> Callable:
     return similarity_fn
 
 
+def random_binary_matrix(n, m, k, rng):
+    """Generate a indices of k values in 1 per row in a random binary n*m matrix.
+
+    Args:
+    n: Number of rows.
+    m: Number of columns.
+    k: Number of 1's per row.
+
+    Returns
+    -------
+    np.ndarray
+        A binary matrix of shape `(n, m)` with exactly `k` ones per row.
+    """
+    dtype = np.uint16 if m < 2**16 else np.uint32
+    indices = np.tile(np.arange(m, dtype=dtype), (n, 1))
+    rng.permuted(indices, axis=1, out=indices)
+    return np.sort(indices[:, :k], axis=1)
+
+
+def average_precision(rel_k) -> np.ndarray:
+    """Compute average precision based on binary list indices."""
+    num_pos = rel_k.shape[1]
+    pr_k = np.arange(1, num_pos + 1, dtype=np.float32) / (rel_k + 1)
+    ap_values = pr_k.sum(axis=1) / num_pos
+    return ap_values.astype(np.float32)
+
+
 def ap_contiguous(
     rel_k_list: np.ndarray, counts: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -423,20 +452,129 @@ def ap_contiguous(
     return ap_scores, null_confs
 
 
+def random_ap(num_perm: int, num_pos: int, total: int, seed: int):
+    """Generate random Average Precision (AP) scores to create a null distribution.
+
+    This function computes multiple Average Precision (AP) scores based on randomly
+    generated binary relevance lists. It is useful for generating a null distribution
+    to assess the significance of observed AP scores.
+
+    Parameters
+    ----------
+    num_perm : int
+        Number of random permutations (i.e., how many random relevance lists to generate).
+    num_pos : int
+        Number of positive samples (1's) in each relevance list.
+    total : int
+        Total number of samples (columns) in each relevance list.
+    seed : int
+        Seed for the random number generator to ensure reproducibility.
+
+    Returns
+    -------
+    np.ndarray
+        A 1D array containing the Average Precision scores for each randomly
+        generated relevance list.
+    """
+    # Initialize the random number generator
+    rng = np.random.default_rng(seed)
+
+    # Generate a binary matrix with `num_perm` rows and `total` columns,
+    # where each row contains exactly `num_pos` ones distributed randomly
+    rel_k = random_binary_matrix(num_perm, total, num_pos, rng)
+
+    # Compute Average Precision (AP) scores for each row of the binary matrix
+    null_dist = average_precision(rel_k)
+    return null_dist
+
+
+def _cache_read(path: Path) -> np.ndarray | None:
+    """Read a cached .npy file, returning None on any corruption or absence."""
+    try:
+        return np.load(path)
+    except (FileNotFoundError, ValueError, EOFError, OSError):
+        return None
+
+
+def _cache_write(path: Path, arr: np.ndarray) -> None:
+    """Write a .npy file atomically via temp file + os.replace.
+
+    os.replace is atomic on POSIX (same filesystem), so concurrent readers
+    see either the old complete file or the new complete file, never a
+    partial write.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".npy")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            np.save(f, arr)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def null_dist_cached(
+    num_pos: int, total: int, seed: int, null_size: int, cache_dir: Path
+) -> np.ndarray:
+    """Generate or retrieve a cached null distribution for a given configuration.
+
+    Each (num_pos, total, seed) triple is cached as an individual .npy file,
+    so a cached null is exactly the one ``random_ap`` would generate. Reads
+    are lock-free (just np.load), and writes use atomic rename to prevent
+    corruption from concurrent workers.
+
+    Parameters
+    ----------
+    num_pos : int
+        Number of positive pairs in the configuration.
+    total : int
+        Total number of pairs (positive + negative) in the configuration.
+    seed : int
+        Random seed for reproducibility.
+    null_size : int
+        Number of samples to generate in the null distribution.
+    cache_dir : Path
+        Directory to store or retrieve cached null distributions.
+
+    Returns
+    -------
+    np.ndarray
+        Null distribution for the specified configuration.
+    """
+    if seed is None:
+        return random_ap(null_size, num_pos, total, seed)
+
+    path = cache_dir / f"n{total}_k{num_pos}_s{seed}.npy"
+    null_dist = _cache_read(path)
+    if null_dist is None:
+        null_dist = random_ap(null_size, num_pos, total, seed)
+        _cache_write(path, null_dist)
+    return null_dist
+
+
+def _conf_seed(seed: int, num_pos: int, total: int) -> int:
+    """Return the seed of one configuration's null, a function of its values only."""
+    return int(np.random.SeedSequence([seed, num_pos, total]).generate_state(1)[0])
+
+
 def get_null_dists(
     confs: np.ndarray,
     null_size: int,
-    seed: int,
-    *,
+    seed: int | None,
+    cache_dir: str | Path | None = None,
     progress_bar: bool = True,
+    *,
+    sampler: str = "legacy",
     backend: str = "auto",
 ) -> np.ndarray:
     """Generate null distributions for each configuration of positive and total pairs.
 
-    Each null is sampled exactly with :func:`copairs.nulls.ap_nulls`: sample
-    ``j`` of a ``(num_pos, total)`` configuration depends only on
-    ``(seed, num_pos, total, j)``, so it does not depend on the other
-    configurations, and takes O(1) memory. Nothing is cached.
+    The default sampler uses the v0.6.0 draw stream and disk cache. The
+    streamed sampler uses the Philox draws from :func:`copairs.nulls.ap_nulls`.
+    Both seed each configuration independently of other configurations.
 
     Parameters
     ----------
@@ -446,16 +584,20 @@ def get_null_dists(
     null_size : int
         Number of samples to generate in the null distribution.
     seed : int or None
-        Random seed for reproducibility, an integer in ``[0, 2**64)``. With
-        ``None``, fresh entropy is resolved once for the call.
+        Nonnegative seed for reproducibility. The streamed sampler requires
+        it to be below ``2**64``. ``None`` uses fresh draws and skips the cache.
+    cache_dir : str or pathlib.Path, optional
+        Root of the legacy sampler's cache. Defaults to ``~/.copairs``.
     progress_bar : bool
-        Accepted for compatibility; sampling shows no progress bar.
+        Show a progress bar for the legacy sampler.
+    sampler : str
+        ``"legacy"`` (default) or ``"streamed"``. Streamed draws require no
+        disk cache.
     backend : str
-        ``"auto"`` (default), ``"cuda"``, ``"numba"`` or ``"numpy"``.
-        ``"auto"`` picks Numba when installed, else NumPy, with identical
-        values (:func:`copairs.nulls.resolve_backend`). ``"cuda"`` (``pip
-        install 'copairs[gpu]'``) runs only when asked for (see
-        :func:`copairs.nulls.ap_nulls`).
+        ``"auto"`` (default), ``"cuda"``, ``"numba"`` or ``"numpy"``. For streamed draws,
+        ``"auto"`` selects Numba when usable and otherwise NumPy. Both
+        produce the same draws. Choose ``"cuda"`` to run streamed draws on a GPU.
+        The legacy sampler always uses NumPy.
 
     Returns
     -------
@@ -463,7 +605,37 @@ def get_null_dists(
         A 2D float32 array where each row corresponds to a null distribution for
         a specific configuration. Configurations without positives get NaN.
     """
-    check_backend(backend)
+    check_sampler(sampler, backend, cache_dir)
+    if sampler == "streamed":
+        return _streamed_null_dists(confs, null_size, seed, backend)
+
+    cache_dir = Path.home() / ".copairs" if cache_dir is None else Path(cache_dir)
+    cache_dir = cache_dir / f"seed{seed}" / f"ns{null_size}"
+    if seed is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+    num_confs = len(confs)
+    null_dists = np.empty([len(confs), null_size], dtype=np.float32)
+    # Resolve fresh entropy once, before dispatching configuration work. Keep
+    # seed=None runs uncached even though each worker now gets a derived seed.
+    run_seed = np.random.SeedSequence().entropy if seed is None else seed
+
+    def par_func(i):
+        num_pos, total = confs[i]
+        conf_seed = _conf_seed(run_seed, num_pos, total)
+        if seed is None:
+            null_dists[i] = random_ap(null_size, num_pos, total, conf_seed)
+        else:
+            null_dists[i] = null_dist_cached(
+                num_pos, total, conf_seed, null_size, cache_dir
+            )
+
+    parallel_map(par_func, np.arange(num_confs), progress_bar)
+    return null_dists
+
+
+def _streamed_null_dists(confs, null_size, seed, backend):
+    """Materialize the requested Philox draws without using the disk cache."""
     # Take (n, 2) rows, or no configurations at all.
     confs = np.asarray(confs)
     if confs.size == 0:
@@ -475,8 +647,12 @@ def get_null_dists(
     ranked = ~_without_positives(confs)
     if ranked.all():
         return nulls.ap_nulls(confs, null_size, seed, backend=backend)
+    has_ranked = ranked.any()
+    if not has_ranked:
+        # No sampling call will validate the requested backend.
+        resolve_backend(backend, "ap_nulls")
     out = np.full((len(confs), null_size), np.nan, dtype=np.float32)
-    if ranked.any():
+    if has_ranked:
         out[ranked] = nulls.ap_nulls(confs[ranked], null_size, seed, backend=backend)
     return out
 
@@ -494,17 +670,19 @@ def p_values(
     ap_scores: np.ndarray,
     null_confs: np.ndarray,
     null_size: int,
-    seed: int,
+    seed: int | None,
     progress_bar: bool = True,
+    *,
+    sampler: str = "legacy",
     backend: str = "auto",
-    max_workers: Optional[int] = None,
+    max_workers: int | None = None,
 ):
     """Calculate p-values for an array of Average Precision (AP) scores using a null distribution.
 
-    Null samples are those of :func:`get_null_dists`, streamed in bounded
-    memory without a cache. A null score counts against an AP when it is
-    ``>= score``, treating values within the scores' rounding as ties (see
-    :func:`copairs.nulls.tie_thresholds`).
+    The default uses the cached v0.6.0 null draws and counts values ``>= score``.
+    With ``sampler="streamed"``, Philox draws are processed in bounded chunks
+    without a cache and the comparison includes a rounding tolerance from
+    :func:`copairs.nulls.tie_thresholds`.
 
     Parameters
     ----------
@@ -516,28 +694,66 @@ def p_values(
     null_size : int
         Number of samples to generate in the null distribution for each configuration.
     seed : int or None
-        Seed of the null samples, an integer in ``[0, 2**64)``; see
-        :func:`get_null_dists`.
+        Nonnegative seed for reproducibility. The streamed sampler requires
+        it to be below ``2**64``. See :func:`get_null_dists`.
     progress_bar : bool
         Whether or not to show tqdm's progress bar.
+    sampler : str
+        ``"legacy"`` (default) or ``"streamed"``.
     backend : str
         ``"auto"`` (default), ``"cuda"``, ``"numba"`` or ``"numpy"``, see
         :func:`get_null_dists`.
     max_workers : int, optional
-        Threads of the NumPy backend (default: the CPUs this process may run
-        on). The Numba backend uses Numba's threads, set by
-        ``NUMBA_NUM_THREADS`` or ``numba.set_num_threads``, and the CUDA
-        backend the GPU. P-values do not depend on the threads.
+        Threads for the streamed NumPy backend (default: the CPUs this process
+        may run on). The Numba backend uses Numba's threads, set by
+        ``NUMBA_NUM_THREADS`` or ``numba.set_num_threads``. The CUDA backend uses the GPU.
+        P-values do not depend on the threads.
 
     Returns
     -------
     np.ndarray
         An array of p-values corresponding to the input AP scores.
-        Configurations without positives get p-values of 1.
+        With the streamed sampler, configurations without positives get
+        p-values of 1.
     """
-    check_backend(backend)
+    check_sampler(sampler, backend)
     # Identify unique configurations and their indices
     confs, rev_ix = np.unique(null_confs, axis=0, return_inverse=True)
+    if sampler == "streamed":
+        return _streamed_ap_pvalues(
+            ap_scores,
+            confs,
+            rev_ix,
+            null_size,
+            seed,
+            progress_bar,
+            backend,
+            max_workers,
+        )
+
+    # Generate null distributions for each unique configuration
+    null_dists = get_null_dists(confs, null_size, seed, progress_bar=progress_bar)
+
+    # Sort null distributions for efficient p-value computation
+    null_dists.sort(axis=1)
+
+    # Initialize an array to store the p-values
+    pvals = np.empty(len(ap_scores), dtype=np.float32)
+
+    # Compute p-values for each AP score
+    for i, (ap_score, ix) in enumerate(zip(ap_scores, rev_ix)):
+        # Find the rank of the observed AP score in the sorted null distribution
+        num = null_size - np.searchsorted(null_dists[ix], ap_score)
+
+        # Calculate the p-value as the proportion of null scores >= observed score
+        pvals[i] = (num + 1) / (null_size + 1)
+    return pvals
+
+
+def _streamed_ap_pvalues(
+    ap_scores, confs, rev_ix, null_size, seed, progress_bar, backend, max_workers
+):
+    """Compute AP p-values for each row against the streamed Philox null."""
     rev_ix = rev_ix.ravel()
     ranked = ~_without_positives(confs)
     pvals = np.ones(len(rev_ix), dtype=np.float32)

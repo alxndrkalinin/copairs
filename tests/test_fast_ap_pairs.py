@@ -1,14 +1,17 @@
 """The pairs the Numba and CUDA AP stages attach for the permutation null."""
 
+import os
+import threading
+
 import numpy as np
 import pandas as pd
 import pytest
 
 pytest.importorskip("numba", reason="Numba optional extra is unavailable")
 
-from copairs import compute
+from copairs import fastap, compute
 from copairs.map import multilabel, average_precision, mean_average_precision
-from tests.helpers import shared_labels, random_targets
+from tests.helpers import run_isolated, shared_labels, random_targets
 from tests.markers import AP_BACKENDS, needs_gpu
 from copairs.fastap import similarity
 from copairs._backend import backend_module
@@ -116,6 +119,37 @@ def test_distances_without_kernel_recompute_with_numpy():
     )
 
 
+@pytest.mark.parametrize("backend", AP_BACKENDS)
+@pytest.mark.parametrize("distance", ["euclidean", "manhattan", "chebyshev"])
+@pytest.mark.parametrize(
+    "dtype, offset",
+    [(np.int64, 2**53), (np.int64, -(2**53) - 2), (np.uint64, 2**63)],
+    ids=["signed-positive", "signed-negative", "unsigned"],
+)
+def test_large_integer_minkowski_ap_preserves_numpy_order(
+    backend, distance, dtype, offset
+):
+    """Adjacent large integers stay distinct when scoring and recomputing AP pairs."""
+    meta = pd.DataFrame({"group": ["a", "b", "a", "b"]})
+    # Descending values keep the unsigned subtractions in the NumPy path exact.
+    feats = np.array([[offset + delta] for delta in (2, 1, 1, 0)], dtype=dtype)
+    args = (meta, feats, ["group"], [], [], ["group"])
+    kwargs = dict(distance=distance, return_pairs=True, progress_bar=False)
+    expected, _ = average_precision(*args, backend="numpy", **kwargs)
+    got, pairs = average_precision(*args, backend=backend, **kwargs)
+    np.testing.assert_array_equal(
+        got["average_precision"], expected["average_precision"]
+    )
+    assert pairs["similarity"].kernel_backend is None
+    np.testing.assert_array_equal(pairs["similarity"](np.array([[1, 3]])), [0.5])
+    null_kwargs = {**NULL, "null_size": 16}
+    got_map = mean_average_precision(got, ["group"], **null_kwargs)
+    expected_map = mean_average_precision(expected, ["group"], **null_kwargs)
+    pd.testing.assert_frame_equal(got_map, expected_map)
+    with pytest.raises(ValueError, match="integers outside the exact float64 range"):
+        fastap.PairSimilarity(feats, distance)
+
+
 @pytest.mark.parametrize("multi", [False, True], ids=["single", "multilabel"])
 def test_permutation_null_reproduces_numba_aps_of_near_ties(multi):
     """The null re-ranks a Numba AP stage's near-tied pairs as the stage did.
@@ -137,7 +171,10 @@ def test_permutation_null_reproduces_numba_aps_of_near_ties(multi):
         pytest.fail("no seed gave near ties that the backends rank differently")
     ap = rows(ap_fn(feats, "numba"))
     for null in NULLS:
-        p = mean_average_precision(ap, [sameby], null=null, **NULL)["p_value"]
+        options = {"sampler": "streamed"} if null == "copied" else {}
+        p = mean_average_precision(ap, [sameby], null=null, **options, **NULL)[
+            "p_value"
+        ]
         assert ((p > 0) & (p <= 1)).all()
 
 
@@ -187,7 +224,10 @@ def test_kernel_ap_stages_give_numpy_pvalues(backend, null):
             ap = ap_fn(feats, b, distance="euclidean")
             if sameby == "target":
                 ap = shared_labels(ap)
-            m = mean_average_precision(ap, [sameby], null=null, backend="numba", **NULL)
+            options = {"sampler": "streamed"} if null == "copied" else {}
+            m = mean_average_precision(
+                ap, [sameby], null=null, backend="numba", **options, **NULL
+            )
             got.append(m.sort_values(sameby).reset_index(drop=True))
         pd.testing.assert_frame_equal(*got)
         assert got[0]["below_p"].any() and got[0]["p_value"].nunique() > 1
@@ -229,6 +269,41 @@ def test_null_threads_compute_similarities_serially(null_backend, monkeypatch):
 
 
 @needs_gpu
+def test_permutation_recomputes_on_the_ap_device(monkeypatch):
+    """The permutation workers use the GPU selected when AP computed similarities."""
+    from copairs.fastap import cuda
+
+    if cuda.cp.cuda.runtime.getDeviceCount() < 2:
+        pytest.skip("needs two visible CUDA devices")
+
+    resolved = []
+    kernel = cuda._kernel
+
+    def record(name):
+        if name.startswith("pair_sims_"):
+            resolved.append((cuda.cp.cuda.Device().id, threading.get_ident()))
+        return kernel(name)
+
+    monkeypatch.setattr(cuda, "_kernel", record)
+    feats = np.random.default_rng(14).integers(-5, 6, size=(96, 8)).astype(np.float64)
+    caller = threading.get_ident()
+    with cuda.cp.cuda.Device(1):
+        ap = plate_ap(feats, "cuda", distance="euclidean")
+    assert resolved and set(resolved) == {(1, caller)}
+
+    resolved.clear()
+    options = NULL | dict(null_size=100, max_workers=2)
+    with cuda.cp.cuda.Device(0):
+        result = mean_average_precision(ap, ["g"], backend="numpy", **options)
+        assert cuda.cp.cuda.Device().id == 0
+
+    assert resolved and {device for device, _ in resolved} == {1}
+    assert any(thread != caller for _, thread in resolved)
+    assert result["p_value"].between(0, 1, inclusive="right").all()
+    assert result["p_value"].nunique() > 1
+
+
+@needs_gpu
 def test_pairs_check_the_gpu_before_every_kernel_call(monkeypatch):
     """The CUDA kernel, once built, still runs the GPU check before each call.
 
@@ -243,7 +318,11 @@ def test_pairs_check_the_gpu_before_every_kernel_call(monkeypatch):
     def forked():
         raise RuntimeError("forked")
 
+    def select_device(*args):
+        pytest.fail("the CUDA device was used before checking for a fork")
+
     monkeypatch.setattr("copairs._cuda.require", forked)  # imports CuPy
+    monkeypatch.setattr("copairs._cuda.cp.cuda.Device", select_device)
     with pytest.raises(RuntimeError, match="forked"):
         pairs["similarity"](pairs["neg"][:4])
 
@@ -276,3 +355,43 @@ def test_null_releases_the_kernel_it_built(backend, monkeypatch):
             mean_average_precision(ap, [sameby], backend="numba", **NULL)
             assert similarity._kernel is None
     assert builds == ["cosine"] * 4
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+def test_forked_child_can_build_attached_similarity(monkeypatch):
+    """The child can build its kernel while the parent holds the build lock."""
+    monkeypatch.setenv("NUMBA_THREADING_LAYER", "workqueue")
+    monkeypatch.setenv("NUMBA_NUM_THREADS", "2")
+    result = run_isolated("""
+import multiprocessing as mp
+
+import numpy as np
+import pandas as pd
+from copairs.map import average_precision
+from copairs.map.average_precision import _BUILD
+
+meta = pd.DataFrame({'group': ['a', 'a', 'b', 'b']})
+feats = np.array([[0., 0.], [0., 1.], [0., 1.], [0., 0.]])
+_, pairs = average_precision(
+    meta, feats, ['group'], [], [], ['group'], distance='euclidean',
+    backend='numba', return_pairs=True, progress_bar=False,
+)
+similarity = pairs['similarity']
+assert similarity._kernel is None
+
+def score():
+    np.testing.assert_array_equal(similarity(np.array([[0, 1]])), [0.5])
+
+with _BUILD:
+    child = mp.get_context('fork').Process(target=score)
+    child.start()
+    try:
+        child.join(timeout=10)
+        assert child.exitcode is not None, 'forked child did not build similarity'
+        assert child.exitcode == 0, child.exitcode
+    finally:
+        if child.is_alive():
+            child.kill()
+            child.join()
+""")
+    assert result.returncode == 0, result.stderr

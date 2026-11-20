@@ -10,12 +10,24 @@ Numba (:func:`copairs._backend.available_backends` lists both).
 from copairs._backend import kernels, cpu_backends, step_backend
 
 BACKENDS = ("auto", "cuda", "numba", "numpy")
+SAMPLERS = ("legacy", "streamed")
 
 
 def check_backend(backend: str) -> None:
     """Raise ValueError unless ``backend`` names a known backend."""
     if backend not in BACKENDS:
         raise ValueError(f"unknown backend {backend!r}; expected one of {BACKENDS}")
+
+
+def check_sampler(sampler: str, backend: str, cache_dir=None) -> None:
+    """Validate the sampler options without probing optional dependencies."""
+    check_backend(backend)
+    if sampler not in SAMPLERS:
+        raise ValueError(f"unknown sampler {sampler!r}; expected one of {SAMPLERS}")
+    if sampler == "legacy" and backend in ("numba", "cuda"):
+        raise ValueError(f"backend={backend!r} requires sampler='streamed'")
+    if sampler == "streamed" and cache_dir is not None:
+        raise ValueError("cache_dir is only supported with sampler='legacy'")
 
 
 def resolve_backend(backend: str, step: str = "map_nulls") -> str:
@@ -29,8 +41,7 @@ def resolve_backend(backend: str, step: str = "map_nulls") -> str:
     cannot compile a kernel raises from the first call that needs it, under
     ``"auto"`` too. ``"auto"`` never picks ``"cuda"``, which runs only when
     asked for: its samples equal NumPy's by error bounds rather than by
-    identical arithmetic (see :mod:`copairs.nulls.cuda`), and it has not been
-    tested bit for bit on a GPU. Only the AP nulls and their p-values
+    identical arithmetic (see :mod:`copairs.nulls.cuda`), so CUDA is an explicit choice. Only the AP nulls and their p-values
     (``step="ap_nulls"``) have GPU kernels; under ``"cuda"`` the joint and
     permutation nulls (``"map_nulls"``, the default) run on Numba, as the AP
     stage's CPU steps do. ``"numba"`` and ``"cuda"`` raise an ImportError
@@ -43,6 +54,8 @@ def resolve_backend(backend: str, step: str = "map_nulls") -> str:
     runs_on = step_backend(step, backend)
     if runs_on == "cuda":
         _import_cuda_backend()
+    elif backend == "numba":
+        _import_numba_backend()
     elif runs_on == "numba":
         kernels(step, backend)  # a missing package names the extra of backend
     return runs_on

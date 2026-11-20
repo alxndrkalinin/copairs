@@ -1,13 +1,13 @@
-"""Tests for backend= of copairs' public AP and mAP p-value functions, and their nulls."""
+"""Tests for streamed AP and copied mAP nulls through their public APIs."""
 
 from pathlib import Path
+from importlib import import_module
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
 import pytest
 
-import copairs.map.map as map_module
 from copairs import nulls, compute
 from copairs.map import (
     get_map_pvalue,
@@ -21,7 +21,6 @@ from tests.helpers import (
     brute_ap_pvalues,
     brute_map_pvalues,
 )
-from copairs.matching import UnpairedException
 from copairs.map.normalization import expected_ap
 from copairs.map.average_precision import p_values as frame_p_values
 
@@ -50,14 +49,30 @@ def test_nulls_are_copairs_nulls_and_not_cached(backend, tmp_path, monkeypatch):
     """get_null_dists samples with copairs.nulls; nothing is written to ~/.copairs."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     got = compute.get_null_dists(
-        CONFS, 300, seed=4, progress_bar=False, backend=backend
+        CONFS, 300, seed=4, progress_bar=False, sampler="streamed", backend=backend
     )
     np.testing.assert_array_equal(got, nulls.ap_nulls(CONFS, 300, seed=4))
     frame = random_ap_frame(np.random.default_rng(0), n=50, n_groups=8)
     mean_average_precision(
-        frame, ["g"], 300, 0.05, 4, progress_bar=False, null="copied", backend=backend
+        frame,
+        ["g"],
+        300,
+        0.05,
+        4,
+        progress_bar=False,
+        null="copied",
+        sampler="streamed",
+        backend=backend,
     )
-    compute.p_values([0.5], [[3, 10]], 300, 4, progress_bar=False, backend=backend)
+    compute.p_values(
+        [0.5],
+        [[3, 10]],
+        300,
+        4,
+        progress_bar=False,
+        sampler="streamed",
+        backend=backend,
+    )
     assert not (tmp_path / "home").exists()
 
 
@@ -68,7 +83,13 @@ def test_compute_p_values_match_brute_force(backend):
     null_confs = CONFS[rng.integers(len(CONFS), size=200)]
     scores = rng.random(200)
     got = compute.p_values(
-        scores, null_confs, 3000, seed=1, progress_bar=False, backend=backend
+        scores,
+        null_confs,
+        3000,
+        seed=1,
+        progress_bar=False,
+        sampler="streamed",
+        backend=backend,
     )
     confs, rev_ix = np.unique(null_confs, axis=0, return_inverse=True)
     expected = brute_ap_pvalues(scores, rev_ix.ravel(), confs, 3000, 1)
@@ -81,7 +102,9 @@ def test_frame_p_values(backend):
     rng = np.random.default_rng(8)
     frame = random_ap_frame(rng, n=40)
     frame.loc[:4, "n_pos_pairs"] = 0
-    got = frame_p_values(frame, 1000, seed=2, progress_bar=False, backend=backend)
+    got = frame_p_values(
+        frame, 1000, seed=2, progress_bar=False, sampler="streamed", backend=backend
+    )
     assert np.isnan(got[:5]).all()
     valid = frame.iloc[5:]
     expected = compute.p_values(
@@ -90,12 +113,13 @@ def test_frame_p_values(backend):
         1000,
         2,
         progress_bar=False,
+        sampler="streamed",
     )
     np.testing.assert_array_equal(got[5:], expected)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_copied_map_matches_brute_force(backend):
+def test_copied_map_matches_brute_force(backend, monkeypatch):
     """Copied mAP p-values count group means of the exact AP nulls, ties as ``>=``."""
     rng = np.random.default_rng(2)
     frame = random_ap_frame(rng, n=200, n_groups=30)
@@ -104,6 +128,17 @@ def test_copied_map_matches_brute_force(backend):
     frame.loc[:2, ["n_pos_pairs", "n_total_pairs"]] = [3, 10]
     tied = nulls.ap_nulls([[3, 10]], 1, seed=6, dtype=np.float64)[0, 0]
     frame.loc[:2, "average_precision"] = tied
+    launched = []
+    if backend == "cuda":
+        cuda = import_module("copairs._cuda")
+        kernel = cuda.kernel
+
+        def record_kernel(source, name):
+            launched.append(name)
+            return kernel(source, name)
+
+        monkeypatch.setattr(cuda, "kernel", record_kernel)
+
     result = mean_average_precision(
         frame,
         ["g"],
@@ -112,8 +147,11 @@ def test_copied_map_matches_brute_force(backend):
         seed=6,
         progress_bar=False,
         null="copied",
+        sampler="streamed",
         backend=backend,
     )
+    if backend == "cuda":
+        assert {"ap_nulls_f64", "group_ge"} <= set(launched)
     confs, rev_ix = np.unique(
         frame[["n_pos_pairs", "n_total_pairs"]].values, axis=0, return_inverse=True
     )
@@ -187,7 +225,13 @@ def test_ap_pvalues_match_exact_null(backend):
             confs.append(conf)
             exact.append(np.mean(null >= nulls.tie_thresholds(score)))
     got = compute.p_values(
-        np.array(scores), np.array(confs), 50_000, 3, False, backend=backend
+        np.array(scores),
+        np.array(confs),
+        50_000,
+        3,
+        False,
+        sampler="streamed",
+        backend=backend,
     )
     assert_estimates(got, exact, 50_000)
 
@@ -220,6 +264,7 @@ def test_copied_map_pvalues_match_exact_null(backend):
         seed=3,
         progress_bar=False,
         null="copied",
+        sampler="streamed",
         backend=backend,
     ).set_index("g")
     assert_estimates(result.loc[list(exact), "p_value"], list(exact.values()), 50_000)
@@ -229,15 +274,21 @@ def test_backends_identical_through_public_api():
     """NumPy and Numba give identical AP and mAP p-values."""
     pytest.importorskip("numba")
     frame = random_ap_frame(np.random.default_rng(4))
-    kwargs = dict(null_size=5000, threshold=0.05, seed=1, progress_bar=False)
+    kwargs = dict(
+        null_size=5000, threshold=0.05, seed=1, progress_bar=False, sampler="streamed"
+    )
     a = mean_average_precision(frame, ["g"], null="copied", backend="numpy", **kwargs)
     b = mean_average_precision(frame, ["g"], null="copied", backend="numba", **kwargs)
     pd.testing.assert_frame_equal(a, b)
     confs = frame[["n_pos_pairs", "n_total_pairs"]].values
     ap = frame["average_precision"].to_numpy()
     np.testing.assert_array_equal(
-        compute.p_values(ap, confs, 5000, 1, progress_bar=False, backend="numpy"),
-        compute.p_values(ap, confs, 5000, 1, progress_bar=False, backend="numba"),
+        compute.p_values(
+            ap, confs, 5000, 1, progress_bar=False, sampler="streamed", backend="numpy"
+        ),
+        compute.p_values(
+            ap, confs, 5000, 1, progress_bar=False, sampler="streamed", backend="numba"
+        ),
     )
 
 
@@ -264,7 +315,9 @@ def test_float32_scores_count_ties(backend):
     and pandas 3 to float64; ties hold under both, and the reported mAP keeps
     the APs' dtype.
     """
-    kwargs = dict(null_size=1000, seed=0, progress_bar=False, backend=backend)
+    kwargs = dict(
+        null_size=1000, seed=0, progress_bar=False, sampler="streamed", backend=backend
+    )
     for dtype in (np.float64, np.float32):
         p = compute.p_values(np.array([1 / 3], dtype=dtype), [[1, 3]], **kwargs)
         assert p[0] == 1.0
@@ -302,7 +355,9 @@ def test_max_workers_sets_numpy_threads(backend, monkeypatch):
     frame = random_ap_frame(np.random.default_rng(5))
     scores = frame["average_precision"].to_numpy()
     confs = frame[["n_pos_pairs", "n_total_pairs"]].to_numpy()
-    kwargs = dict(null_size=2000, seed=0, progress_bar=False, backend=backend)
+    kwargs = dict(
+        null_size=2000, seed=0, progress_bar=False, sampler="streamed", backend=backend
+    )
     runs = {
         "ap": lambda w: compute.p_values(scores, confs, max_workers=w, **kwargs),
         "map": lambda w: mean_average_precision(
@@ -326,7 +381,9 @@ def test_max_workers_sets_numpy_threads(backend, monkeypatch):
 def test_max_workers_validated(max_workers):
     """The fast method rejects worker counts ThreadPoolExecutor would."""
     with pytest.raises(ValueError, match="max_workers"):
-        compute.p_values([0.5], [[2, 10]], 10, 0, max_workers=max_workers)
+        compute.p_values(
+            [0.5], [[2, 10]], 10, 0, sampler="streamed", max_workers=max_workers
+        )
     with pytest.raises(ValueError, match="max_workers"):
         nulls.map_pvalues(
             [0.5], [0, 1], [0], [1], CONFS[:1], 10, 0, max_workers=max_workers
@@ -340,7 +397,7 @@ def test_configurations_without_positives():
     configuration, controls (0 positives) included.
     """
     confs = np.array([[0, 10], [2, 10], [0, 0], [3, 3]])
-    kwargs = dict(seed=0, progress_bar=False)
+    kwargs = dict(seed=0, progress_bar=False, sampler="streamed")
     got = compute.get_null_dists(confs, 50, **kwargs)
     assert got.dtype == np.float32
     np.testing.assert_array_equal(np.isnan(got).all(axis=1), [True, False, True, False])
@@ -374,12 +431,14 @@ def empty_ap_frame():
 def test_null_dists_need_conf_rows(confs):
     """Configurations that are not (n, 2) rows raise rather than being reshaped."""
     with pytest.raises(ValueError, match=r"shape \(n, 2\)"):
-        compute.get_null_dists(confs, 10, 0)
+        compute.get_null_dists(confs, 10, 0, sampler="streamed")
 
 
 def test_null_dists_of_no_confs():
     """An empty list of configurations gives no nulls."""
-    assert compute.get_null_dists([], 10, 0, progress_bar=False).shape == (0, 10)
+    assert compute.get_null_dists(
+        [], 10, 0, progress_bar=False, sampler="streamed"
+    ).shape == (0, 10)
 
 
 @pytest.mark.parametrize(
@@ -396,7 +455,7 @@ def test_empty_input_still_validates(bad, match):
     The copied null samples Philox streams, so it shares the joint and
     permutation nulls' seed range.
     """
-    kwargs = dict(null_size=100, seed=0, progress_bar=False) | bad
+    kwargs = dict(null_size=100, seed=0, progress_bar=False, sampler="streamed") | bad
     for confs in (np.empty((0, 2), dtype=int), np.array([[0, 10]])):
         with pytest.raises(ValueError, match=match):
             compute.p_values(np.zeros(len(confs)), confs, **kwargs)
@@ -427,9 +486,13 @@ def test_unknown_backend(null):
 def test_numba_backend_without_numba_names_the_extra():
     """backend="numba" without numba raises an ImportError naming the extra."""
     with pytest.raises(ImportError, match=r"copairs\[numba\]"):
-        compute.p_values(np.array([0.5]), [[2, 10]], 10, 0, backend="numba")
+        compute.p_values(
+            np.array([0.5]), [[2, 10]], 10, 0, sampler="streamed", backend="numba"
+        )
     with pytest.raises(ImportError, match=r"copairs\[numba\]"):
-        compute.p_values(np.array([]), np.empty((0, 2)), 10, 0, backend="numba")
+        compute.p_values(
+            np.array([]), np.empty((0, 2)), 10, 0, sampler="streamed", backend="numba"
+        )
     with pytest.raises(ImportError, match=r"copairs\[numba\]"):
         mean_average_precision(
             perfect_retrieval_scores(),
@@ -438,9 +501,17 @@ def test_numba_backend_without_numba_names_the_extra():
             0.05,
             0,
             null="copied",
+            sampler="streamed",
             backend="numba",
         )
     with pytest.raises(ImportError, match=r"copairs\[numba\]"):
         mean_average_precision(
-            empty_ap_frame(), ["g"], 10, 0.05, 0, null="copied", backend="numba"
+            empty_ap_frame(),
+            ["g"],
+            10,
+            0.05,
+            0,
+            null="copied",
+            sampler="streamed",
+            backend="numba",
         )

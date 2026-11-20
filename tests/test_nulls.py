@@ -564,14 +564,33 @@ def run_python(
     return done.stdout
 
 
+# Public mAP cases with real pair metadata, scored in fresh interpreters.
+_MAP_CASES = """
+meta = pd.DataFrame({"g": ["q"] * 3 + [f"c{i}" for i in range(8)]})
+feats = np.random.default_rng(0).standard_normal((len(meta), 4))
+ap = copairs.map.average_precision(meta, feats, ["g"], [], [], ["g"],
+                                   progress_bar=False)
+ap = ap[ap["g"] == "q"]
+targets = pd.DataFrame({"target": [["A"], ["A", "B"], ["B"], ["A"], ["B"], []]})
+targets["target"] = [t + [f"own{i}"] for i, t in enumerate(targets["target"])]
+labelled = copairs.map.multilabel.average_precision(
+    targets, feats[:6], ["target"], [], [], ["target"], multilabel_col="target",
+    progress_bar=False,
+)
+labelled = labelled[labelled["target"].isin(["A", "B"])]
+map_cases = (("permutation", ap, "g"), ("joint", ap, "g"),
+             ("permutation", labelled, "target"))
+"""
+
+
 def test_default_path_runs_without_numba():
-    """Without numba, copairs imports, "auto" runs on NumPy and "numba" names the extra."""
+    """Legacy, streamed NumPy, joint, and permutation nulls run without Numba."""
     out = run_python(
         _WITHOUT_NUMBA
         + """
 import numpy as np
 import pandas as pd
-import copairs, copairs.map, copairs.compute
+import copairs
 from copairs import nulls, compute
 from copairs.map import mean_average_precision
 
@@ -584,83 +603,81 @@ except ImportError as exc:
     assert "copairs[numba]" in str(exc), exc
 else:
     raise AssertionError("backend='numba' ran without numba")
-p = compute.p_values(np.array([0.5, 1.0]), np.array([[2, 10], [1, 4]]), 100, 0,
-                     progress_bar=False)
 frame = pd.DataFrame({"g": ["a", "a"], "average_precision": [0.5, 0.6],
                       "normalized_average_precision": 0.0, "n_pos_pairs": 1,
                       "n_total_pairs": 10})
-m = mean_average_precision(frame, ["g"], 100, 0.05, 0, progress_bar=False,
-                           null="copied")
-# The default (permutation) and joint nulls of real APs run on NumPy.
-meta = pd.DataFrame({"g": ["q"] * 3 + [f"c{i}" for i in range(8)]})
-feats = np.random.default_rng(0).standard_normal((len(meta), 4))
-ap = copairs.map.average_precision(meta, feats, ["g"], [], [], ["g"],
-                                   progress_bar=False)
-ap = ap[ap["g"] == "q"]
-perm = mean_average_precision(ap, ["g"], 100, 0.05, 0, progress_bar=False)
-joint = mean_average_precision(ap, ["g"], 100, 0.05, 0, progress_bar=False,
-                               null="joint")
-# And the permutation null of multilabel APs.
-targets = pd.DataFrame({"target": [["A"], ["A", "B"], ["B"], ["A"], ["B"], []]})
-targets["target"] = [t + [f"own{i}"] for i, t in enumerate(targets["target"])]
-labelled = copairs.map.multilabel.average_precision(
-    targets, feats[:6], ["target"], [], [], ["target"], multilabel_col="target",
-    progress_bar=False,
-)
-labelled = labelled[labelled["target"].isin(["A", "B"])]
-label = mean_average_precision(labelled, ["target"], 100, 0.05, 0,
-                               progress_bar=False)
-assert "numba" not in sys.modules
-for null, frame, by in (("permutation", ap, "g"), ("joint", ap, "g"),
-                        ("permutation", labelled, "target")):
+for options in ({}, {"sampler": "streamed"}):
+    p = compute.p_values([0.5, 1.0], [[2, 10], [1, 4]], 100, None,
+                         progress_bar=False, **options)
+    m = mean_average_precision(frame, ["g"], 100, 0.05, None, progress_bar=False,
+                               null="copied", **options)
+    assert p.shape == (2,) and np.isfinite(p).all()
+    assert m["p_value"].notna().all()
+"""
+        + _MAP_CASES
+        + """
+for null, scores, by in map_cases:
+    got = mean_average_precision(scores, [by], 100, 0.05, 0, progress_bar=False,
+                                 null=null)
+    assert got["p_value"].notna().all()
     try:
-        mean_average_precision(frame, [by], 100, 0.05, 0, progress_bar=False,
+        mean_average_precision(scores, [by], 100, 0.05, 0, progress_bar=False,
                                null=null, backend="numba")
     except ImportError as exc:
         assert "copairs[numba]" in str(exc), exc
     else:
         raise AssertionError(f"backend='numba' ran the {null} null without numba")
-print(list(p), list(m["p_value"]), list(perm["p_value"]), list(joint["p_value"]),
-      list(label["p_value"]))
+print("numba" in sys.modules)
 """
     )
-    assert out.strip()
+    assert out.strip() == "False"
 
 
 def test_auto_falls_back_when_numba_fails_to_import(tmp_path):
-    """An installed Numba that fails to import leaves "auto" on NumPy, warning once.
-
-    ``backend="numba"`` still raises the import error.
-    """
+    """Explicit auto selection falls back to NumPy and warns once."""
     fake = tmp_path / "numba"
     fake.mkdir()
     (fake / "__init__.py").write_text('raise ImportError("simulated broken numba")\n')
+    python_path = os.pathsep.join(
+        filter(None, (str(tmp_path), os.environ.get("PYTHONPATH")))
+    )
     out = run_python(
         without_modules("cupy")
-        + f"""
-import sys, warnings
-sys.path.insert(0, {str(tmp_path)!r})
+        + """
+import warnings
 import numpy as np
 import pandas as pd
+import copairs
 from copairs import nulls, compute
 from copairs.map import mean_average_precision
-
-frame = pd.DataFrame({{"g": ["a", "a"], "average_precision": [0.5, 0.6],
+"""
+        + _MAP_CASES
+        + """
+frame = pd.DataFrame({"g": ["a", "a"], "average_precision": [0.5, 0.6],
                       "normalized_average_precision": 0.0, "n_pos_pairs": 1,
-                      "n_total_pairs": 10}})
+                      "n_total_pairs": 10})
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always")
+    p = compute.p_values(np.array([0.5, 1.0]), [[2, 10], [1, 4]], 100, 0,
+                         progress_bar=False, sampler="streamed")
+    m = mean_average_precision(frame, ["g"], 100, 0.05, 0, progress_bar=False,
+                               null="copied", sampler="streamed")
+    for null, scores, by in map_cases:
+        args = (scores, [by], 100, 0.05, 0)
+        kwargs = dict(progress_bar=False, null=null)
+        got = mean_average_precision(*args, **kwargs, backend="auto")
+        reference = mean_average_precision(*args, **kwargs, backend="numpy")
+        pd.testing.assert_frame_equal(got, reference)
     assert nulls.available_backends() == ["numpy"], nulls.available_backends()
     assert nulls.resolve_backend("auto") == "numpy"
-    p = compute.p_values(np.array([0.5, 1.0]), [[2, 10], [1, 4]], 100, 0,
-                         progress_bar=False)
-    m = mean_average_precision(frame, ["g"], 100, 0.05, 0, progress_bar=False,
-                               null="copied")
 shown = [str(w.message) for w in caught if w.category is RuntimeWarning]
 assert len(shown) == 1 and "simulated broken numba" in shown[0], shown
 expected = compute.p_values(np.array([0.5, 1.0]), [[2, 10], [1, 4]], 100, 0,
-                            progress_bar=False, backend="numpy")
+                            progress_bar=False, sampler="streamed", backend="numpy")
 assert np.array_equal(p, expected)
+expected_map = mean_average_precision(frame, ["g"], 100, 0.05, 0, progress_bar=False,
+                                      null="copied", sampler="streamed", backend="numpy")
+pd.testing.assert_frame_equal(m, expected_map)
 try:
     nulls.ap_nulls([[2, 5]], 4, 0, backend="numba")
 except ImportError as exc:
@@ -668,7 +685,8 @@ except ImportError as exc:
 else:
     raise AssertionError("backend='numba' ran with a broken numba")
 print(list(p), list(m["p_value"]))
-"""
+""",
+        env={**os.environ, "PYTHONPATH": python_path},
     )
     assert out.strip()
 
@@ -678,7 +696,7 @@ print(list(p), list(m["p_value"]))
     [
         "nulls.available_backends()",
         "nulls.ap_nulls([[2, 5]], 4, 0)",
-        "compute.p_values(np.array([0.5]), [[2, 10]], 100, 0, progress_bar=False)",
+        "compute.p_values(np.array([0.5]), [[2, 10]], 100, 0, sampler='streamed', progress_bar=False)",
     ],
 )
 def test_broken_numba_warning_points_at_the_call(tmp_path, call):
@@ -709,15 +727,90 @@ print(shown[0].filename)
 
 
 def test_import_does_not_load_numba():
-    """With numba installed, importing copairs and its null modules leaves it unloaded."""
+    """Imports and default null sampling leave installed Numba unloaded."""
     pytest.importorskip("numba")
     out = run_python(
-        "import sys\nimport copairs, copairs.map, copairs.compute, copairs.nulls\n"
-        "import copairs.map.multilabel, copairs.nulls.sampler, copairs.nulls.pvalues\n"
-        "import copairs.nulls.joint, copairs.nulls.permutation\n"
-        "print('numba' in sys.modules)"
+        """
+import sys
+import numpy as np
+import pandas as pd
+import copairs, copairs.map, copairs.compute, copairs.nulls
+import copairs.map.multilabel, copairs.nulls.sampler, copairs.nulls.pvalues
+import copairs.nulls.joint, copairs.nulls.permutation
+
+assert "numba" not in sys.modules
+copairs.compute.p_values([0.5], [[2, 10]], 4, None, progress_bar=False)
+frame = pd.DataFrame({"g": ["a", "a"], "average_precision": [0.5, 0.6],
+                      "normalized_average_precision": 0.0, "n_pos_pairs": 1,
+                      "n_total_pairs": 10})
+copairs.map.get_map_pvalue(frame, ["g"], 4, seed=None, progress_bar=False, null="copied")
+"""
+        + _MAP_CASES
+        + """
+for null, scores, by in map_cases:
+    got = copairs.map.get_map_pvalue(scores, [by], 100, 0, progress_bar=False, null=null)
+    assert got["p_value"].notna().all()
+print("numba" in sys.modules)
+"""
     )
     assert out.strip() == "False"
+
+
+def test_parallel_ap_null_kernels_hold_shared_lock(monkeypatch):
+    """AP, copied mAP, and joint launches share the cache module lock."""
+    pytest.importorskip("numba")
+    from copairs import _numba_cache
+    from copairs.nulls import _numba
+
+    launched = set()
+
+    def check(name, kernel):
+        def guarded(*args):
+            assert _numba_cache._LAUNCH.locked()
+            launched.add(name)
+            return kernel(*args)
+
+        return guarded
+
+    assert _numba._launch is _numba_cache.launch
+    kernels = ("_ap_nulls", "_count_ge_kernel", "_group_ge", "_joint_nulls")
+    for name in kernels:
+        monkeypatch.setattr(_numba, name, check(name, getattr(_numba, name)))
+
+    nulls.ap_pvalues([0.5], [0], [[1, 7]], 4, 7, backend="numba")
+    nulls.map_pvalues([0.5], [0, 1], [0], [1], [[1, 7]], 4, 7, backend="numba")
+    nulls.joint_pvalues([0.5], [0], [(((1, 6),), ())], 4, 7, backend="numba")
+    assert launched == set(kernels)
+
+
+def test_streamed_ap_pvalues_run_concurrently_on_workqueue(monkeypatch):
+    """Two threads can stream Numba AP p-values in the same process."""
+    pytest.importorskip("numba")
+    monkeypatch.setenv("NUMBA_THREADING_LAYER", "workqueue")
+    monkeypatch.setenv("NUMBA_NUM_THREADS", "2")
+    run_python("""
+from threading import Barrier
+from concurrent.futures import ThreadPoolExecutor
+
+import numba
+import numpy as np
+
+from copairs import nulls
+
+args = ([0.5], [0], [[1, 7]], 1 << 20, 7)
+expected = nulls.ap_pvalues(*args, backend="numba")
+assert numba.threading_layer() == "workqueue"
+barrier = Barrier(2, timeout=10)
+
+def score():
+    barrier.wait()
+    return nulls.ap_pvalues(*args, backend="numba")
+
+with ThreadPoolExecutor(max_workers=2) as pool:
+    pending = [pool.submit(score) for _ in range(2)]
+    for future in pending:
+        np.testing.assert_array_equal(future.result(), expected)
+""")
 
 
 @pytest.mark.parametrize("hist_bytes", [16, 64, 800, 2**28])

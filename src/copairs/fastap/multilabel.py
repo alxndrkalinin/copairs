@@ -5,8 +5,8 @@ so their cost is the number of such pairs. Pairs that share no label are all
 other candidate pairs; candidates are every pair, or the monolabel pairs of
 the remaining ``sameby``/``diffby`` columns. Rows whose labels cannot be
 indexed exactly (missing values inside lists, duplicate labels in a row,
-mixed label types, a non-default index) return None so callers can fall back
-to the SQL implementation.
+mixed label types, a non-default index), or whose index would generate too
+many pairs, return None so callers can fall back to SQL.
 """
 
 import numba
@@ -25,6 +25,9 @@ from copairs.fastap.ranking import (
     sortable_keys,
     ap_from_counts,
 )
+
+# Cap the eager label expansion and its per-pair temporary buffers.
+_MAX_INDEXED_LABEL_PAIRS = 2**22
 
 
 def label_members(labels: pd.Series):
@@ -81,9 +84,11 @@ def _in_sorted(keys, sorted_keys):
 
 
 def multilabel_pairs(dframe, multilabel_col):
-    """``(keys, pairs, label)`` of rows sharing each label, or None if unsupported.
+    """``(keys, pairs, label)`` of rows sharing each label, or None for SQL.
 
-    Pairs are grouped by label (see :func:`_label_pairs`).
+    Pairs are grouped by label (see :func:`_label_pairs`). A dense index can
+    generate many more pairs than the matching rules need. Use SQL before
+    allocating the expansion when it would exceed the cap.
     """
     if not dframe.index.equals(pd.RangeIndex(len(dframe))):
         return None
@@ -91,6 +96,9 @@ def multilabel_pairs(dframe, multilabel_col):
     if members is None:
         return None
     keys, ptr, rows = members
+    sizes = map(int, np.diff(ptr))
+    if sum(size * (size - 1) // 2 for size in sizes) > _MAX_INDEXED_LABEL_PAIRS:
+        return None
     pairs, label = _label_pairs(ptr, rows)
     return keys, pairs, label
 
@@ -105,15 +113,19 @@ def _monolabel_keys(dframe, sameby, diffby):
 def _column_codes(dframe, columns, multilabel_col):
     """Integer codes of each column's values, or None if SQL must compare them.
 
-    find_pairs compares in DuckDB, where missing values never match and mixed
-    Python types are converted, so such columns keep the SQL comparison.
+    find_pairs compares in DuckDB, where missing values never match, mixed
+    Python types are converted and timedeltas have microsecond precision.
     """
     codes = []
     for c in columns:
         col = dframe[c]
         if c == multilabel_col:  # label lists, already checked, compare whole
             col = col.map(tuple)
-        elif col.isna().any() or pd.api.types.infer_dtype(col).startswith("mixed"):
+        elif (
+            pd.api.types.is_timedelta64_dtype(col.dtype)
+            or col.isna().any()
+            or pd.api.types.infer_dtype(col).startswith("mixed")
+        ):
             return None
         codes.append(pd.factorize(col)[0])
     return codes
@@ -285,6 +297,7 @@ def multilabel_ap(pos_pairs, pos_sims, pos_counts, neg_pairs, neg_sims, n):
     num_pos = np.diff(pos_ptr)
     max_pos = int(num_pos.max()) if len(num_pos) else 0
     n_tasks = max(1, min(len(rows), 4 * numba.get_num_threads()))
-    args = (pos_ptr, end_keys, profile, neg_ptr, neg_vals, max_pos, n_tasks)
-    ap = launch(_rows_ap, *args)
+    ap = launch(
+        _rows_ap, pos_ptr, end_keys, profile, neg_ptr, neg_vals, max_pos, n_tasks
+    )
     return rows // n, profile, ap, num_pos, num_pos + np.diff(neg_ptr)[profile]

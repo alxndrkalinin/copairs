@@ -528,3 +528,4 @@ def count_ge(null, thr, ptr, counts, budget_bytes: int):
             _cuda.grid(int(n_seg)), (_cuda.BLOCK,), (seg, n_seg, hist, part)
         )
         counts[lo:hi] += host(part)
+        del args, seg, hist, part

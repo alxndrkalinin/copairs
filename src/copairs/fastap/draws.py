@@ -9,6 +9,8 @@ matrix product, and each query row's AP from counting the negatives above
 each of its sorted positives, so no row is fully sorted.
 """
 
+import operator
+
 import numba
 import numpy as np
 
@@ -81,9 +83,18 @@ def _drawn_rows(feats: np.ndarray, idx: np.ndarray) -> tuple[np.ndarray, np.ndar
     return feats[used], position[idx]
 
 
+def _bytes_per_draw(k: int, m: int, d: int) -> int:
+    return 4 * (k + m) * (d + k)
+
+
 def _chunk(n_draws: int, k: int, m: int, d: int, budget_bytes: int) -> int:
-    per_draw = 4 * (k + m) * (d + k)
-    return int(max(1, min(n_draws, budget_bytes // per_draw)))
+    budget_bytes = operator.index(budget_bytes)
+    if budget_bytes <= 0:
+        raise ValueError("budget_bytes must be positive")
+    per_draw = _bytes_per_draw(k, m, d)
+    if n_draws and per_draw > budget_bytes:
+        raise ValueError(f"one draw needs {per_draw} bytes, exceeding budget_bytes")
+    return max(1, min(n_draws, budget_bytes // per_draw))
 
 
 def draw_average_precisions(
@@ -111,8 +122,9 @@ def draw_average_precisions(
         Only the rows that some draw uses are converted, normalized and
         checked: zero-norm or non-finite rows raise ValueError when drawn.
     budget_bytes : int
-        Upper bound on gathered features and similarities held at once (in
-        GPU memory on the CUDA backend).
+        Positive byte limit for the gathered feature and similarity arrays
+        in each chunk, in GPU memory for ``"cuda"``. Raises ValueError if a
+        nonempty batch cannot fit one draw.
     backend : {"numba", "cuda"}
         ``"cuda"`` (``pip install 'copairs[gpu]'``) computes similarities and
         APs on the GPU, except for draws whose queries' keys and bins (8 bytes
@@ -126,18 +138,28 @@ def draw_average_precisions(
     np.ndarray
         ``(n_draws, k)`` float64 APs.
     """
-    queries = np.asarray(queries, dtype=np.int64)
-    references = np.asarray(references, dtype=np.int64)
+    queries = np.asarray(queries)
+    references = np.asarray(references)
     if queries.ndim != 2 or references.ndim != 2 or len(queries) != len(references):
         raise ValueError("queries and references must be (n_draws, k) and (n_draws, m)")
-    k = queries.shape[1]
+    n_draws, k = queries.shape
+    m = references.shape[1]
     if k < 2:
         raise ValueError(f"need at least 2 queries per draw, got {k}")
     for idx in (queries, references):
-        if idx.size and (idx.min() < 0 or idx.max() >= len(feats)):
+        if not idx.size:
+            continue
+        if idx.dtype.kind not in "iu":
+            raise ValueError("queries and references must contain integer row indices")
+        if idx.min() < 0 or int(idx.max()) >= len(feats):
             raise ValueError(f"indices must address the {len(feats)} rows of feats")
-    idx = np.concatenate([queries, references], axis=1)
-    feats, idx = _drawn_rows(np.asarray(feats), idx)
+    feats = np.asarray(feats)
+    _chunk(n_draws, k, m, feats.shape[1], budget_bytes)
+    # Validated indices fit int64. Empty inputs may have NumPy's default dtype.
+    idx = np.concatenate(
+        [queries, references], axis=1, dtype=np.int64, casting="unsafe"
+    )
+    feats, idx = _drawn_rows(feats, idx)
     x = unit_rows(feats, normalized)
     # Looked up after the checks: under "cuda" it checks the GPU.
     kernels = backend_module(backend)

@@ -150,6 +150,58 @@ def test_array_label_cells_with_other_columns():
 
 
 @pytest.mark.parametrize(
+    "sameby,diffby,expected",
+    [
+        (["labels", "elapsed"], [], {(0, 1)}),
+        (["labels"], ["elapsed"], {(0, 2), (1, 2)}),
+    ],
+)
+def test_shared_label_pairs_with_submicrosecond_timedeltas(sameby, diffby, expected):
+    """Match DuckDB's microsecond timedelta equality in both pair rules."""
+    frame = pd.DataFrame(
+        {
+            "labels": [["a"], ["a"], ["a"], ["b"]],
+            "elapsed": pd.to_timedelta([100, 200, 1100, 100], unit="ns"),
+        }
+    )
+    args = (frame, sameby, diffby, "labels")
+    sql, keys, counts = sql_pairs(*args)
+    assert as_set(sql) == expected
+    pairs, fast_keys, fast_counts = index_pairs(*args)
+    assert as_set(pairs) == expected
+    np.testing.assert_array_equal(fast_keys, keys)
+    np.testing.assert_array_equal(fast_counts, counts)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_dense_label_matching_filters_candidates_before_expansion(monkeypatch, shared):
+    """A dense index can fall back to matching within the candidate groups."""
+    frame = pd.DataFrame(
+        {
+            "plate": [0, 1, 0, 1, 2, 2],
+            "labels": [["a"], ["a"], ["a", "b"], ["a"], ["a"], ["c"]],
+        }
+    )
+    sameby = ["labels", "plate"] if shared else ["plate"]
+    diffby = [] if shared else ["labels"]
+    expected = sql_pairs(frame, sameby, diffby, "labels")
+
+    def fail_expansion(*args):
+        pytest.fail("dense label pairs were materialized before filtering")
+
+    monkeypatch.setattr(fastap.multilabel, "_MAX_INDEXED_LABEL_PAIRS", 3, raising=False)
+    monkeypatch.setattr(fastap.multilabel, "_label_pairs", fail_expansion)
+    got = index_pairs(frame, sameby, diffby, "labels")
+    if shared:
+        pairs, keys, counts = got
+        assert as_set(pairs) == as_set(expected[0]) == {(0, 2), (1, 3)}
+        np.testing.assert_array_equal(keys, expected[1])
+        np.testing.assert_array_equal(counts, expected[2])
+    else:
+        assert as_set(got) == as_set(expected) == {(4, 5)}
+
+
+@pytest.mark.parametrize(
     "labels,index",
     [
         ([["a", None], ["a"], ["b"]], None),  # missing value inside a list

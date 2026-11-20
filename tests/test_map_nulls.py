@@ -30,15 +30,19 @@ from copairs.methods import NULLS
 from tests.test_nulls import run_python
 
 
-def test_copied_null_averages_configuration_nulls():
+def test_copied_null_averages_configuration_nulls(tmp_path):
     """null="copied" averages each member's configuration null, as copairs 0.5.5."""
     rows = [("a", 0.4, 2, 30)] * 3 + [("b", 0.3, 4, 40), ("b", 0.5, 5, 41)]
     frame = ap_frame(rows)
-    got = get_map_pvalue(frame, ["g"], 500, 0, progress_bar=False, null="copied")
+    got = get_map_pvalue(
+        frame, ["g"], 500, 0, progress_bar=False, cache_dir=tmp_path, null="copied"
+    )
     confs, rev_ix = np.unique(
         frame[["n_pos_pairs", "n_total_pairs"]].values, axis=0, return_inverse=True
     )
-    null_dists = compute.get_null_dists(confs, 500, seed=0, progress_bar=False)
+    null_dists = compute.get_null_dists(
+        confs, 500, seed=0, cache_dir=tmp_path / "ref", progress_bar=False
+    )
     for g, p in zip(got["g"], got["p_value"]):
         rows = np.flatnonzero(frame["g"] == g)
         null = null_dists[rev_ix.ravel()[rows]].mean(axis=0, dtype=np.float64)
@@ -51,7 +55,7 @@ def perfect_retrieval_scores():
     return ap_frame([("a", 1.0, 1, 100)] * 2 + [("b", 0.5, 1, 100)] * 2)
 
 
-def test_map_pvalue_counts_ties():
+def test_map_pvalue_counts_ties(tmp_path):
     """An mAP equal to a null atom counts the atom.
 
     Under the copied null P(mAP >= 1) = P(AP >= 1) = 1/100. Under the joint
@@ -69,6 +73,7 @@ def test_map_pvalue_counts_ties():
             perfect_retrieval_scores(),
             ["g"],
             null=null,
+            cache_dir=tmp_path,
             pos_pairs=np.array([[0, 1], [2, 3]]) if null == "joint" else None,
             **kwargs,
         )
@@ -77,7 +82,7 @@ def test_map_pvalue_counts_ties():
 
 
 @pytest.mark.parametrize("null", ["copied", "joint"])
-def test_float32_scores_count_ties(null):
+def test_float32_scores_count_ties(null, tmp_path):
     """float32-rounded scores still tie with the null atoms they round from.
 
     With one positive among 3, AP is 1, 1/2 or 1/3, so every null value is
@@ -102,6 +107,7 @@ def test_float32_scores_count_ties(null):
         0,
         progress_bar=False,
         null=null,
+        cache_dir=tmp_path,
         pos_pairs=np.array([[0, 1]]) if null == "joint" else None,
     )
     assert got["p_value"].iloc[0] == 1.0
@@ -109,7 +115,7 @@ def test_float32_scores_count_ties(null):
 
 
 @pytest.mark.parametrize("keys", [str, int])
-def test_map_column_is_the_score(keys, monkeypatch):
+def test_map_column_is_the_score(keys, tmp_path, monkeypatch):
     """The mAP column is the float64 mean in the APs' dtype, and the nulls' score.
 
     pandas averages float32 APs to float32 or float64 depending on its version
@@ -317,13 +323,29 @@ def test_auto_backend_runs_numba_kernels(monkeypatch):
     kwargs = dict(null_size=500, threshold=0.05, seed=0, progress_bar=False)
     labelled = plate_label_aps()
     for null in ("joint", "permutation"):
-        mean_average_precision(ap, ["g"], null=null, **kwargs)
-    mean_average_precision(labelled, ["target"], **kwargs)
+        mean_average_precision(ap, ["g"], null=null, backend="auto", **kwargs)
+    mean_average_precision(labelled, ["target"], backend="auto", **kwargs)
     assert set(calls) == {"joint", "permutation", "label"}
     calls.clear()
     mean_average_precision(ap, ["g"], null="permutation", backend="numpy", **kwargs)
     mean_average_precision(labelled, ["target"], backend="numpy", **kwargs)
     assert calls == []
+
+
+@pytest.mark.parametrize("null", ["joint", "permutation"])
+def test_default_map_backend_uses_numpy_without_probing_numba(null, monkeypatch):
+    """Omitting the backend preserves the released NumPy path."""
+    from copairs.nulls import backend
+
+    def unexpected_probe():
+        raise AssertionError("default mAP calls must not probe optional backends")
+
+    monkeypatch.setattr(backend, "cpu_backends", unexpected_probe)
+    monkeypatch.setattr(backend, "_import_numba_backend", unexpected_probe)
+    ap = plate_aps(groups=4)
+    kwargs = dict(null_size=100, null=null, progress_bar=False, max_workers=1)
+    expected = get_map_pvalue(ap, ["g"], backend="numpy", **kwargs)
+    pd.testing.assert_frame_equal(get_map_pvalue(ap, ["g"], **kwargs), expected)
 
 
 # User threads run every null's Numba kernels at once on Numba's workqueue
@@ -375,7 +397,9 @@ calls = {
     "permutation-1": lambda: mean_average_precision(
         ap, ["g"], 20000, max_workers=1, **kw
     ),
-    "copied": lambda: mean_average_precision(ap, ["g"], 20000, null="copied", **kw),
+    "copied": lambda: mean_average_precision(
+        ap, ["g"], 20000, null="copied", sampler="streamed", **kw
+    ),
     # 6 labels on 2 Numba threads, then one at a time, as "permutation"
     "label": lambda: mean_average_precision(labelled, ["target"], 20000, **kw),
     "label-1": lambda: mean_average_precision(
@@ -383,7 +407,7 @@ calls = {
     ),
     "ap": lambda: compute.p_values(
         ap["average_precision"].to_numpy(), confs, 20000, 0, progress_bar=False,
-        backend="numba",
+        sampler="streamed", backend="numba",
     ),
 }
 
