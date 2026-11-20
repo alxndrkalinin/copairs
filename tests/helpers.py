@@ -149,6 +149,12 @@ def fake_gpu(monkeypatch, kernels=None):
     from copairs import _cuda
     from copairs.nulls import cuda as nulls_cuda
 
+    modules = [nulls_cuda]
+    if importlib.util.find_spec("numba") is not None:
+        from copairs.fastap import cuda as fastap_cuda
+
+        modules.append(fastap_cuda)
+
     cp, launches = FakeCuPy(), []
     kernels = kernels or {}
 
@@ -173,11 +179,6 @@ def fake_gpu(monkeypatch, kernels=None):
         ("require", lambda: None),
     ):
         monkeypatch.setattr(_cuda, name, value)
-    modules = [nulls_cuda]
-    if importlib.util.find_spec("numba") is not None:
-        from copairs.fastap import cuda as fastap_cuda
-
-        modules.append(fastap_cuda)
     for module in modules:
         monkeypatch.setattr(module, "cp", cp)
         if hasattr(module, "host"):
