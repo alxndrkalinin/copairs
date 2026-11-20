@@ -359,8 +359,10 @@ def average_precision(
 def p_values(
     dframe: pd.DataFrame,
     null_size: int,
-    seed: int,
+    seed: int | None,
     progress_bar: bool = True,
+    *,
+    sampler: str = "legacy",
     backend: str = "auto",
 ) -> np.ndarray:
     """Compute p-values for average precision scores based on a null distribution.
@@ -380,13 +382,15 @@ def p_values(
     null_size : int
         The number of samples to generate in the null distribution for significance testing.
     seed : int or None
-        Random seed of the null distribution, an integer in ``[0, 2**64)``,
-        see :func:`copairs.compute.p_values`.
+        Random seed of the null distribution. See :func:`copairs.compute.p_values`.
     progress_bar : bool
         Whether or not to show tqdm's progress bar.
+    sampler : str
+        Use the v0.6.0 sampler and cache with ``"legacy"`` (default), or use
+        ``"streamed"`` for chunked Philox sampling without a disk cache.
     backend : str
-        Backend of the null sampler: ``"auto"`` (default), ``"numba"`` or
-        ``"numpy"``, all with identical results.
+        ``"auto"`` (default), ``"numba"`` or ``"numpy"``, see
+        :func:`copairs.compute.p_values`.
 
     Returns
     -------
@@ -406,7 +410,13 @@ def p_values(
 
     # Compute p-values for profiles with valid configurations using the null distribution
     pvals[mask] = compute.p_values(
-        scores, null_confs, null_size, seed, progress_bar, backend
+        scores,
+        null_confs,
+        null_size,
+        seed,
+        progress_bar,
+        sampler=sampler,
+        backend=backend,
     )
 
     # Return the array of p-values, including NaN for invalid profiles

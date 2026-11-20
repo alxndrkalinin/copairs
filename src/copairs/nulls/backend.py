@@ -10,12 +10,24 @@ import importlib.util
 from functools import cache
 
 BACKENDS = ("auto", "numba", "numpy")
+SAMPLERS = ("legacy", "streamed")
 
 
 def check_backend(backend: str) -> None:
     """Raise ValueError unless ``backend`` names a known backend."""
     if backend not in BACKENDS:
         raise ValueError(f"unknown backend {backend!r}; expected one of {BACKENDS}")
+
+
+def check_sampler(sampler: str, backend: str, cache_dir=None) -> None:
+    """Validate the sampler options without probing optional dependencies."""
+    check_backend(backend)
+    if sampler not in SAMPLERS:
+        raise ValueError(f"unknown sampler {sampler!r}; expected one of {SAMPLERS}")
+    if sampler == "legacy" and backend == "numba":
+        raise ValueError("backend='numba' requires sampler='streamed'")
+    if sampler == "streamed" and cache_dir is not None:
+        raise ValueError("cache_dir is only supported with sampler='legacy'")
 
 
 def available_backends() -> list[str]:

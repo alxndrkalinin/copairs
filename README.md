@@ -26,42 +26,6 @@ To also install dependencies for running examples, run:
 pip install copairs[demo]
 ```
 
-#### AP nulls and the optional Numba backend
-
-The AP p-value functions (`compute.p_values`, `map.average_precision.p_values`)
-and the copied mAP null (`null="copied"` in `mean_average_precision`,
-`mean_average_precision_hierarchical` and `get_map_pvalue`) sample each AP null
-exactly (Philox counter-based RNG, Vitter's Algorithm A) in O(1) memory per
-sample, instead of permuting a `null_size x total` matrix, and stream p-values
-in bounded memory without a disk cache. Sample `j` of a `(num_pos, total)` null
-depends only on `(seed, num_pos, total, j)`, with `seed` in `[0, 2**64)`.
-
-They take a `backend`. `backend="numpy"` needs nothing extra.
-`backend="numba"` compiles the same code with [Numba](https://numba.pydata.org),
-an optional dependency:
-```bash
-pip install copairs[numba]
-```
-The two backends return bitwise-identical nulls and p-values, so
-`backend="auto"` (default) uses Numba whenever it is installed; if Numba fails
-to import, `"auto"` warns once and uses NumPy. The NumPy backend places the
-positives one at a time, so it is slow for configurations with many positives
-at small null sizes (for 1000 positives among 100,000 pairs at
-`null_size=1000`, 3.6 s against 0.02 s with Numba); install the `numba` extra
-for such data.
-
-Numba starts one thread per host CPU. In a container or job with a CPU quota,
-set `NUMBA_NUM_THREADS` to the quota, or kernels oversubscribe the CPUs. The
-NumPy backend samples on one thread per CPU the process may run on (its CPU
-affinity, which follows `taskset` and Slurm allocations but not a CPU quota),
-or on `max_workers` threads where the function takes it. If
-Numba uses its GNU OpenMP threading layer (the default when it cannot load
-TBB), a process forked after copairs ran a Numba kernel stops when it runs one
-itself ("Terminating: fork() called from a process already using GNU
-OpenMP"). Use the `spawn` or `forkserver` start method, set
-`NUMBA_THREADING_LAYER=workqueue` before the first copairs call, or pass
-`backend="numpy"` in the children.
-
 ### Testing
 
 To run tests, run:
@@ -78,6 +42,41 @@ We provide examples demonstrating how to use copairs for:
 - [calculating mAP to assess phenotypic consistency of perturbations](https://github.com/cytomining/copairs/blob/main/docs/examples/phenotypic_consistency.ipynb)
 - [estimating null size for mAP p-value calculation](https://github.com/cytomining/copairs/blob/main/docs/examples/null_size.ipynb)
 - [comparing the mAP null distributions](https://github.com/cytomining/copairs/blob/main/docs/examples/null_comparison.ipynb)
+
+## Streamed AP nulls
+
+AP p-values and `null="copied"` mAP p-values use the v0.6.0 sampler by
+default (`sampler="legacy"`). Seeded draws keep the v0.6.0 random stream,
+tie handling, and disk cache. Use `cache_dir` on the functions that expose
+it to select the cache location. Calls with `seed=None` draw fresh samples
+without writing a cache.
+
+Pass `sampler="streamed"` to opt into exact random sampling from the AP
+null with Philox and Vitter's Algorithm A. AP and copied mAP p-values
+stream draws in chunks without a disk cache. A sample depends only on its
+configuration, draw index, and seed. The new seed stream and dtype-aware
+tie handling can change p-values obtained with a fixed seed. Streamed
+seeds are integers in `[0, 2**64)` or `None`.
+
+```python
+from copairs.map import mean_average_precision
+from copairs.map.average_precision import p_values
+
+ap_pvalues = p_values(ap, null_size=10_000, seed=0, sampler="streamed")
+copied_map = mean_average_precision(
+    ap, ["compound"], null_size=10_000, threshold=0.05,
+    null="copied", sampler="streamed",
+)
+```
+
+For streamed sampling, `backend="auto"` selects Numba when it imports and
+NumPy otherwise. Both engines return the same draws and p-values. Install
+the optional accelerator with `pip install 'copairs[numba]'`, or choose an
+engine explicitly with `backend="numba"` or `backend="numpy"`. The streamed
+NumPy path can be slower than the legacy cache, especially for a warm cache
+or a small number of draws with many positives. Where exposed,
+`max_workers` controls the streamed NumPy sampler. Use `NUMBA_NUM_THREADS`
+to set the Numba thread count.
 
 ## mAP null distributions
 
@@ -156,9 +155,7 @@ assumptions; calibration depends on the experimental design.
 - `"copied"` retains the earlier statistical model: each member's AP null is
   sampled per `(n_pos_pairs, n_total_pairs)` configuration and the group's
   null averages them, so members with equal pair counts share one draw and
-  the null does not narrow with replicates. Its AP draws are sampled exactly
-  and streamed, without a cache (see
-  [AP nulls](#ap-nulls-and-the-optional-numba-backend)).
+  the null does not narrow with replicates. AP-draw caching remains supported.
 
 ### Multilabel component permutation
 
@@ -192,13 +189,14 @@ insufficient. Use `neg_sameby` to separate plate or batch structure where needed
 [migration notes](docs/migration-0.6.0.md) for API and numerical changes.
 
 - Public mAP functions default to `seed=0`; explicit `None` resolves fresh entropy
-  once per run. Seeds must be integers in `[0, 2**64)`.
+  once per run. Joint/permutation seeds must be integers in `[0, 2**64)`;
+  copied accepts any non-negative integer. Fresh copied runs are not cached.
 - With fixed inputs, row identities, seed and software environment, worker counts
   and computation chunks do not change draws/results.
 - Means accumulate in float64 and are reported in the AP dtype. A null value
   counts when `null >= score - tol`, with
-  `tol = max(1e-10, 8 * eps(AP dtype) * abs(score))`. Closely spaced distinct
-  values can fall within this tolerance.
+  `tol = max(1e-10, 8 * eps(AP dtype) * abs(score))`; copied also accounts for
+  its float32 AP draws. Closely spaced distinct values can fall within this tolerance.
 - Positive draw counts use Monte Carlo `(hits + 1)/(draws + 1)`, with minimum
   sampled p-value `1/(draws + 1)`. There is no automatic exact enumeration or
   adaptive stopping; all requested draws run.
@@ -235,10 +233,9 @@ temporary arrays need additional memory. Per-call settings leave global limits
 unchanged.
 
 `max_workers` controls permutation group work and shared-key construction, plus
-the copied null's NumPy sampler threads. It does not control joint sampling, DuckDB,
-the original AP similarity thread pool, Numba's threads, or BLAS/internal library
-threads. Joint and permutation sampling runs on NumPy; their acceleration and
-persistent caches are separate work.
+copied p-value evaluation. It does not control joint sampling, DuckDB, the original
+AP similarity thread pool, or BLAS/internal library threads. Computation remains
+NumPy-first; acceleration and persistent joint/permutation caches are separate work.
 
 ## Citation
 If you find this work useful for your research, please cite our [paper](https://doi.org/10.1038/s41467-025-60306-2):

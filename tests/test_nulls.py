@@ -547,7 +547,7 @@ def run_python(code: str) -> str:
 
 
 def test_default_path_runs_without_numba():
-    """Without numba, copairs imports, "auto" runs on NumPy and "numba" names the extra."""
+    """The legacy default and streamed NumPy both work without Numba."""
     out = run_python(
         _WITHOUT_NUMBA
         + """
@@ -566,13 +566,16 @@ except ImportError as exc:
     assert "copairs[numba]" in str(exc), exc
 else:
     raise AssertionError("backend='numba' ran without numba")
-p = compute.p_values(np.array([0.5, 1.0]), np.array([[2, 10], [1, 4]]), 100, 0,
-                     progress_bar=False)
 frame = pd.DataFrame({"g": ["a", "a"], "average_precision": [0.5, 0.6],
                       "normalized_average_precision": 0.0, "n_pos_pairs": 1,
                       "n_total_pairs": 10})
-m = mean_average_precision(frame, ["g"], 100, 0.05, 0, progress_bar=False,
-                           null="copied")
+for options in ({}, {"sampler": "streamed"}):
+    p = compute.p_values([0.5, 1.0], [[2, 10], [1, 4]], 100, None,
+                         progress_bar=False, **options)
+    m = mean_average_precision(frame, ["g"], 100, 0.05, None, progress_bar=False,
+                               null="copied", **options)
+    assert p.shape == (2,) and np.isfinite(p).all()
+    assert m["p_value"].notna().all()
 assert "numba" not in sys.modules
 print(list(p), list(m["p_value"]))
 """
@@ -602,17 +605,20 @@ frame = pd.DataFrame({{"g": ["a", "a"], "average_precision": [0.5, 0.6],
                       "n_total_pairs": 10}})
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always")
+    p = compute.p_values(np.array([0.5, 1.0]), [[2, 10], [1, 4]], 100, 0,
+                         progress_bar=False, sampler="streamed")
+    m = mean_average_precision(frame, ["g"], 100, 0.05, 0, progress_bar=False,
+                               null="copied", sampler="streamed")
     assert nulls.available_backends() == ["numpy"], nulls.available_backends()
     assert nulls.resolve_backend("auto") == "numpy"
-    p = compute.p_values(np.array([0.5, 1.0]), [[2, 10], [1, 4]], 100, 0,
-                         progress_bar=False)
-    m = mean_average_precision(frame, ["g"], 100, 0.05, 0, progress_bar=False,
-                               null="copied")
 shown = [str(w.message) for w in caught if w.category is RuntimeWarning]
 assert len(shown) == 1 and "simulated broken numba" in shown[0], shown
 expected = compute.p_values(np.array([0.5, 1.0]), [[2, 10], [1, 4]], 100, 0,
-                            progress_bar=False, backend="numpy")
+                            progress_bar=False, sampler="streamed", backend="numpy")
 assert np.array_equal(p, expected)
+expected_map = mean_average_precision(frame, ["g"], 100, 0.05, 0, progress_bar=False,
+                                      null="copied", sampler="streamed", backend="numpy")
+pd.testing.assert_frame_equal(m, expected_map)
 try:
     nulls.ap_nulls([[2, 5]], 4, 0, backend="numba")
 except ImportError as exc:
@@ -626,12 +632,23 @@ print(list(p), list(m["p_value"]))
 
 
 def test_import_does_not_load_numba():
-    """With numba installed, importing copairs and its null modules leaves it unloaded."""
+    """Imports and default null sampling leave installed Numba unloaded."""
     pytest.importorskip("numba")
     out = run_python(
-        "import sys\nimport copairs, copairs.map, copairs.compute, copairs.nulls\n"
-        "import copairs.map.multilabel, copairs.nulls.sampler, copairs.nulls.pvalues\n"
-        "print('numba' in sys.modules)"
+        """
+import sys
+import pandas as pd
+import copairs, copairs.map, copairs.compute, copairs.nulls
+import copairs.map.multilabel, copairs.nulls.sampler, copairs.nulls.pvalues
+
+assert "numba" not in sys.modules
+copairs.compute.p_values([0.5], [[2, 10]], 4, None, progress_bar=False)
+frame = pd.DataFrame({"g": ["a", "a"], "average_precision": [0.5, 0.6],
+                      "normalized_average_precision": 0.0, "n_pos_pairs": 1,
+                      "n_total_pairs": 10})
+copairs.map.get_map_pvalue(frame, ["g"], 4, seed=None, progress_bar=False, null="copied")
+print('numba' in sys.modules)
+"""
     )
     assert out.strip() == "False"
 
