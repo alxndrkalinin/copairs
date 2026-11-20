@@ -9,6 +9,8 @@ matrix product, and each query row's AP from counting the negatives above
 each of its sorted positives, so no row is fully sorted.
 """
 
+import operator
+
 import numba
 import numpy as np
 
@@ -82,8 +84,13 @@ def _drawn_rows(feats: np.ndarray, idx: np.ndarray) -> tuple[np.ndarray, np.ndar
 
 
 def _chunk(n_draws: int, k: int, m: int, d: int, budget_bytes: int) -> int:
+    budget_bytes = operator.index(budget_bytes)
+    if budget_bytes <= 0:
+        raise ValueError("budget_bytes must be positive")
     per_draw = 4 * (k + m) * (d + k)
-    return int(max(1, min(n_draws, budget_bytes // per_draw)))
+    if n_draws and per_draw > budget_bytes:
+        raise ValueError(f"one draw needs {per_draw} bytes, exceeding budget_bytes")
+    return max(1, min(n_draws, budget_bytes // per_draw))
 
 
 def draw_average_precisions(
@@ -110,7 +117,8 @@ def draw_average_precisions(
         Only the rows that some draw uses are converted, normalized and
         checked: zero-norm or non-finite rows raise ValueError when drawn.
     budget_bytes : int
-        Upper bound on gathered features and similarities held at once.
+        Positive byte limit for the gathered feature and similarity arrays
+        in each chunk. Raises ValueError if a nonempty batch cannot fit one draw.
 
     Returns
     -------
@@ -128,11 +136,12 @@ def draw_average_precisions(
     for idx in (queries, references):
         if idx.size and (idx.min() < 0 or idx.max() >= len(feats)):
             raise ValueError(f"indices must address the {len(feats)} rows of feats")
+    feats = np.asarray(feats)
+    step = _chunk(n_draws, k, m, feats.shape[1], budget_bytes)
     idx = np.concatenate([queries, references], axis=1)
-    feats, idx = _drawn_rows(np.asarray(feats), idx)
+    feats, idx = _drawn_rows(feats, idx)
     x = unit_rows(feats, normalized)
     out = np.empty((n_draws, k), dtype=np.float64)
-    step = _chunk(n_draws, k, m, x.shape[1], budget_bytes)
     for start in range(0, n_draws, step):
         sl = slice(start, start + step)
         rows = x[idx[sl]]  # (b, k + m, d)

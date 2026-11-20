@@ -425,6 +425,44 @@ def test_draw_average_precisions_index_range(bad):
         fastap.draw_average_precisions(feats, [[0, 1]], [[2, bad]])
 
 
+def test_draw_average_precisions_budget_for_one_draw():
+    """One draw fits exactly at the combined feature and similarity size."""
+    feats = np.eye(4, dtype=np.float32)
+    args = (feats, [[0, 1]], [[2, 3]])
+    budget = 4 * (2 + 2) * (feats.shape[1] + 2)
+    with pytest.raises(ValueError, match="one draw"):
+        fastap.draw_average_precisions(*args, budget_bytes=budget - 1)
+    got = fastap.draw_average_precisions(*args, budget_bytes=np.int64(budget))
+    np.testing.assert_array_equal(got, [[1.0, 1.0]])
+
+
+@pytest.mark.parametrize("budget", [0, -1])
+def test_draw_average_precisions_requires_positive_budget(budget):
+    """A nonpositive byte budget is invalid."""
+    with pytest.raises(ValueError, match="budget_bytes must be positive"):
+        fastap.draw_average_precisions(
+            np.eye(4), [[0, 1]], [[2, 3]], budget_bytes=budget
+        )
+
+
+def test_draw_average_precisions_requires_integer_budget():
+    """A fractional byte budget is invalid."""
+    with pytest.raises(TypeError):
+        fastap.draw_average_precisions(
+            np.eye(4), [[0, 1]], [[2, 3]], budget_bytes=100.5
+        )
+
+
+def test_draw_average_precisions_without_draws():
+    """An empty batch needs no space for gathered inputs or similarities."""
+    indices = np.empty((0, 2), dtype=np.int64)
+    got = fastap.draw_average_precisions(
+        np.zeros((4, 4)), indices, indices, budget_bytes=1
+    )
+    assert got.shape == (0, 2)
+    assert got.dtype == np.float64
+
+
 def test_draw_average_precisions_large_norms():
     """Rows whose squared norm overflows float32 keep their cosine ranking."""
     rng = np.random.default_rng(6)
